@@ -44,14 +44,6 @@ pub fn write_atomic(path: &Path, tmp: &Path, bytes: &[u8]) -> std::io::Result<()
     written
 }
 
-/// `std::fs::copy` の代わり。コピー先は元の権限を引き継がず 0600 になる。
-pub fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
-    let mut src = File::open(from)?;
-    let mut dst = create_file(to)?;
-    std::io::copy(&mut src, &mut dst)?;
-    dst.sync_all()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,17 +115,4 @@ mod tests {
         assert!(!tmp.exists());
         std::fs::remove_dir_all(&root).unwrap();
     }
-
-    #[test]
-    fn copy_makes_a_0600_file_even_from_a_world_readable_source() {
-        let root = scratch("copy");
-        let (from, to) = (root.join("from"), root.join("to"));
-        std::fs::write(&from, "data").unwrap();
-        std::fs::set_permissions(&from, Permissions::from_mode(0o644)).unwrap();
-        copy(&from, &to).unwrap();
-        assert_eq!(std::fs::read_to_string(&to).unwrap(), "data");
-        assert_eq!(mode(&to), 0o600);
-        std::fs::remove_dir_all(&root).unwrap();
-    }
 }
-

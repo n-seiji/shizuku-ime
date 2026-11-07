@@ -379,7 +379,7 @@ mod tests {
     use super::*;
     use std::rc::Rc;
     use crate::deps::{FakeLexicon, FakeMemory};
-    use crate::kkc::{learning::Learning, KkcCore};
+    use crate::kkc::KkcCore;
 
     use crate::simulate::{FakeClient, FakeEnv, FakePanel};
 
@@ -700,29 +700,26 @@ mod tests {
         assert!(crate::context::with(|store| store.get("com.1password.1password", std::time::Instant::now()).is_empty()));
     }
 
-    /// パスワード管理アプリで確定・候補クリック・数字キー選択をしても、学習も文脈の記録もされない。
+    /// パスワード管理アプリで確定・候補クリック・数字キー選択をしても、文脈の記録はされない。
     #[test]
-    fn a_commit_a_click_and_a_digit_pick_learn_nothing_in_a_password_manager() {
+    fn a_commit_a_click_and_a_digit_pick_record_no_context_in_a_password_manager() {
         const APP: &str = "com.1password.1password";
         let context_empty = || crate::context::with(|store| store.get(APP, std::time::Instant::now()).is_empty());
         let setup = || {
             let client = RecClient::default();
             client.set_bundle(Some(APP));
-            let (c, core, _) = observing_controller(RecEnv::default());
+            let (c, _) = observing_controller(RecEnv::default());
             open_candidate_window(&c, &client);
-            (c, client, core)
+            (c, client)
         };
-        let (c, _client, core) = setup();
+        let (c, _client) = setup();
         c.on_candidate_selected("幹事");
-        assert!(!engine_learned(&core), "click");
         assert!(context_empty(), "click");
-        let (c, client, core) = setup();
+        let (c, client) = setup();
         assert!(rec_press(&c, &client, Key::Digit(3), "3"));
-        assert!(!engine_learned(&core), "digit");
         assert!(context_empty(), "digit");
-        let (c, client, core) = setup();
+        let (c, client) = setup();
         assert!(rec_press(&c, &client, Key::Enter, "\r"));
-        assert!(!engine_learned(&core), "enter");
         assert!(context_empty(), "enter");
     }
 
@@ -778,18 +775,14 @@ mod tests {
         assert_eq!(memory.learned().len(), 1, "commit-all learns when allowed");
     }
 
-    /// 英語の記憶と engine の学習の両方を観測できる controller (どちらも本物のファイルには触れない)。
-    fn observing_controller(env: RecEnv) -> (FakeDepsController, Rc<KkcCore>, FakeMemory) {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+    /// 英語の記憶を観測できる controller (本物のファイルには触れない)。
+    fn observing_controller(env: RecEnv) -> (FakeDepsController, FakeMemory) {
+        let core = Rc::new(KkcCore::open().unwrap());
         let lexicon = FakeLexicon::default();
         let memory = lexicon.memory();
-        let composer = Composer::new(RustEngine::with_core(core.clone()), lexicon);
+        let composer = Composer::new(RustEngine::with_core(core), lexicon);
         let session = Session::new(composer, memory.clone(), ConversionMode::Space);
-        (Controller::new(1, session, HookPanel::default(), env), core, memory)
-    }
-
-    fn engine_learned(core: &KkcCore) -> bool {
-        !core.learning().borrow().is_empty()
+        (Controller::new(1, session, HookPanel::default(), env), memory)
     }
 
     /// "kanji" を打ち、候補ウィンドウを開く。
@@ -800,53 +793,11 @@ mod tests {
         assert!(matches!(c.phase(), Phase::Converting { window: true, .. }));
     }
 
-    fn candidate_click_learns(secure: bool) -> bool {
-        let env = RecEnv::default();
-        let client = RecClient::default();
-        let (c, core, _) = observing_controller(env.clone());
-        open_candidate_window(&c, &client);
-        env.secure.set(secure);
-        c.on_candidate_selected("幹事");
-        engine_learned(&core)
-    }
-
-    #[test]
-    fn a_candidate_click_is_learned_when_allowed() {
-        assert!(candidate_click_learns(false));
-    }
-
-    #[test]
-    fn a_candidate_click_is_not_learned_under_secure_input() {
-        assert!(!candidate_click_learns(true));
-    }
-
-    fn picking_by_digit_learns(secure: bool) -> bool {
-        let env = RecEnv::default();
-        let client = RecClient::default();
-        let (c, core, _) = observing_controller(env.clone());
-        open_candidate_window(&c, &client);
-        env.secure.set(secure);
-        // 通常は数字キーで選択・確定する。セキュア入力中は作文中の分を確定してから数字が素通しになる。
-        assert_eq!(rec_press(&c, &client, Key::Digit(3), "3"), !secure);
-        assert_eq!(c.phase(), Phase::Empty);
-        engine_learned(&core)
-    }
-
-    #[test]
-    fn picking_a_candidate_by_digit_is_learned_when_allowed() {
-        assert!(picking_by_digit_learns(false));
-    }
-
-    #[test]
-    fn picking_a_candidate_by_digit_is_not_learned_under_secure_input() {
-        assert!(!picking_by_digit_learns(true));
-    }
-
     #[test]
     fn digits_do_nothing_once_the_cursor_has_left_the_first_nine() {
         let env = RecEnv::default();
         let client = RecClient::default();
-        let (c, core, _) = observing_controller(env);
+        let (c, _) = observing_controller(env);
         open_candidate_window(&c, &client);
         for _ in 0..13 {
             rec_press(&c, &client, Key::Space, " ");
@@ -855,7 +806,6 @@ mod tests {
         assert!(selected >= 9, "{selected}");
         assert!(rec_press(&c, &client, Key::Digit(3), "3"), "数字キーは握りつぶす");
         assert!(matches!(c.phase(), Phase::Converting { selected: s, window: true } if s == selected), "確定も移動もしない");
-        assert!(!engine_learned(&core));
         // 上へ戻って先頭 9 件の中に来ても、パネルの見え方が分からないので数字は効かない。
         for _ in 0..selected - 2 {
             rec_press(&c, &client, Key::Up, "");
@@ -863,25 +813,22 @@ mod tests {
         assert!(matches!(c.phase(), Phase::Converting { selected: 2, .. }));
         assert!(rec_press(&c, &client, Key::Digit(3), "3"));
         assert!(matches!(c.phase(), Phase::Converting { selected: 2, window: true }));
-        assert!(!engine_learned(&core));
         // #1 まで戻れば、パネルは最上段なので数字が効く。
         rec_press(&c, &client, Key::Up, "");
         rec_press(&c, &client, Key::Up, "");
         assert!(matches!(c.phase(), Phase::Converting { selected: 0, .. }));
         assert!(rec_press(&c, &client, Key::Digit(3), "3"));
         assert_eq!(c.phase(), Phase::Empty);
-        assert!(engine_learned(&core));
     }
 
     fn english_commit_is_remembered(secure: bool) -> bool {
         let env = RecEnv::default();
         let client = RecClient::default();
-        let (c, core, memory) = observing_controller(env.clone());
+        let (c, memory) = observing_controller(env.clone());
         // かなにしきれない打鍵 (rg) があるので、語として知られていなくても英語として打っている。
         rec_type(&c, &client, "merge");
         env.secure.set(secure);
         rec_press(&c, &client, Key::Enter, "\r");
-        assert!(!engine_learned(&core));
         memory.learned().iter().any(|w| w == "merge")
     }
 
@@ -1222,7 +1169,7 @@ mod tests {
         let client = RecClient::default();
         client.set_bundle(Some("app.pick"));
         let lexicon = FakeLexicon::default().with_english_word(|w| w == "the");
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let composer = Composer::new(RustEngine::with_core(core), lexicon.clone());
         // 記憶は lexicon と繋がない: 繋ぐと 1 回目の選択で the を覚え、2 回目以降は候補を経ず英字のまま確定する (票の数え方を見るテストなので外す)。
         let session = Session::new(composer, crate::deps::FakeMemory::default(), ConversionMode::Space);

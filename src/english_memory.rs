@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 // english_memory.rs - 英語として確定した語 (git など) を覚え、次から打ちかけの時点で英字表示するための記憶。
-// 置き場所は変換の学習と同じディレクトリの english.txt。1 行 1 語で、新しく使った語が先頭。
-// 新しい語を覚えたときだけ書き出す (語はたまにしか増えないので、変換の学習のような裏の書き手は持たない)。
+// 置き場所は `<memory_dir>/rust-learning/english.txt` (ディレクトリ名は以前の変換学習のときのまま)。1 行 1 語で、新しく使った語が先頭。
+// 新しい語を覚えたときだけ書き出す (語はたまにしか増えないので、裏の書き手は持たない)。
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,12 @@ const CAPACITY: usize = 2048;
 /// 覚える語の長さ。長い英字列は合言葉やトークンの手打ちかもしれないので覚えない。
 const MAX_LEN: usize = 24;
 const FILE_NAME: &str = "english.txt";
+const DIR_NAME: &str = "rust-learning";
+
+/// 記憶の置き場所 (`<設定の memory_dir>/rust-learning`)。
+pub fn memory_dir(config: &crate::config::Config) -> Option<PathBuf> {
+    config.memory_dir.as_ref().map(|base| base.join(DIR_NAME))
+}
 
 /// 覚えてよい語か。小文字の英字だけで 2 文字以上 `MAX_LEN` 以下。
 pub fn is_memorable(word: &str) -> bool {
@@ -47,7 +53,7 @@ impl Store {
     fn from_config(config: &crate::config::Config) -> Self {
         let path = config
             .learning_enabled
-            .then(|| crate::kkc::learning_dir(config))
+            .then(|| memory_dir(config))
             .flatten()
             .map(|dir| dir.join(FILE_NAME));
         let words = path

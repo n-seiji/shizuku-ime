@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::dict::{Dictionary, CC_MISSING};
-use super::learning::Learning;
 use super::elem::{include_mm_value_calculation, is_clause, Elem, CID_PROPER_NOUN, MID_BOS_EOS, MID_GENERAL};
 use super::wise::wise_dicdata;
 
@@ -200,12 +199,11 @@ pub struct Lattice {
 const OPEN_N_BEST: usize = 512;
 
 impl Lattice {
-    /// `memory` の学習エントリと `extra` の語も辞書の語と同じようにノードにする (辞書の語のあとに並べる。`extra` は同じ語・読みが辞書にあれば足さない)。`chars` はカタカナ化済みの読み。
-    pub fn build(dict: &Dictionary, cache: &mut LookupCache, memory: &Learning, extra: &ExtraWords, chars: &[char]) -> Self {
+    /// `extra` の語も辞書の語と同じようにノードにする (辞書の語のあとに並べる。`extra` は同じ語・読みが辞書にあれば足さない)。`chars` はカタカナ化済みの読み。
+    pub fn build(dict: &Dictionary, cache: &mut LookupCache, extra: &ExtraWords, chars: &[char]) -> Self {
         let n = chars.len();
         let mut nodes = vec![Node::new(Rc::new(Elem::bos()), 0, false)];
         let mut ranges = Vec::with_capacity(n);
-        let mut learned: Vec<Found> = Vec::new();
         for start in 0..n {
             let from = nodes.len();
             let upper = (start + MAX_LENGTH).min(n);
@@ -214,14 +212,6 @@ impl Lattice {
             for f in found.iter().flat_map(|g| g.iter()) {
                 // 読みが切り出した範囲に収まらない語は来ないはずだが、念のため
                 if f.ruby_chars == 0 || start + f.ruby_chars > n {
-                    continue;
-                }
-                nodes.push(Node::new(f.elem.clone(), start + f.ruby_chars, false));
-            }
-            learned.clear();
-            memory.lookup(&substring, &mut learned);
-            for f in &learned {
-                if start + f.ruby_chars > n {
                     continue;
                 }
                 nodes.push(Node::new(f.elem.clone(), start + f.ruby_chars, false));

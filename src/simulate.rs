@@ -346,8 +346,8 @@ impl Sim {
 }
 
 pub(crate) fn setup_env() {
-    // 既定は学習 off。`SHIZUKU_SIM_LEARNING=1` なら学習 on (記憶先は一時ディレクトリ。SHIZUKU_MEMORY_DIR で変えられる)。
-    // 学習は 1 つのファイルの中に積み上がるので、`--simulate-file` の行どうしにも効く。
+    // 既定は英語の記憶 off。`SHIZUKU_SIM_LEARNING=1` なら on (記憶先は一時ディレクトリ。SHIZUKU_MEMORY_DIR で変えられる)。
+    // 記憶は 1 つのファイルの中に積み上がるので、`--simulate-file` の行どうしにも効く。
     let learning = std::env::var("SHIZUKU_SIM_LEARNING").is_ok_and(|v| v == "1");
     let memory_dir = match std::env::var_os("SHIZUKU_MEMORY_DIR") {
         Some(dir) if learning && !dir.is_empty() => PathBuf::from(dir),
@@ -495,7 +495,7 @@ fn play(steps: &[(String, Step)], verbose: bool) -> Result<Run, String> {
 
 /// 「表示されている文字が Enter で確定する」の検査。実装 (preedit / commit_preview) を見ずに、
 /// 下線付き文字列が残った打鍵ごとに、同じ打鍵列を新しい Sim で打ち直して Enter を押し、確定された文字列と比べる。
-/// 学習が on のときは打ち直しの確定が記憶を変えるので、この検査は off のとき (`mise run wysiwyg`) 専用。
+/// 記憶が on のときは打ち直しの確定が記憶を変えるので、この検査は off のとき (`mise run wysiwyg`) 専用。
 fn unmatched_enter(steps: &[(String, Step)], marked_after: &[String]) -> Vec<String> {
     let enter = key_input(36, "\r");
     let mut broken = Vec::new();

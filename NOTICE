@@ -4,7 +4,7 @@ Shizuku third-party notices
 AzooKeyKanaKanjiConverter
 -------------------------
 The kana-kanji converter in src/kkc/ (dictionary reader, lattice and N-best
-Viterbi search, dynamic entries, candidate post-processing, learning) is a Rust
+Viterbi search, dynamic entries, candidate post-processing) is a Rust
 port of AzooKeyKanaKanjiConverter v0.11.2
 (https://github.com/azooKey/AzooKeyKanaKanjiConverter), distributed under the
 MIT License:

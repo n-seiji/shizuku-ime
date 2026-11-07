@@ -7,10 +7,10 @@ use std::sync::OnceLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// 学習データの親ディレクトリ (`SHIZUKU_MEMORY_DIR`、無ければ `~/Library/Application Support/Shizuku`)。
-    /// HOME も無ければ `None` で、学習は読み書きしない。
+    /// 英語の記憶の親ディレクトリ (`SHIZUKU_MEMORY_DIR`、無ければ `~/Library/Application Support/Shizuku`)。
+    /// HOME も無ければ `None` で、記憶は読み書きしない。
     pub memory_dir: Option<PathBuf>,
-    /// 学習・英語の記憶を使うか (`SHIZUKU_DISABLE_LEARNING=1` で false)。
+    /// 英語の記憶と文脈の記録を使うか (`SHIZUKU_DISABLE_LEARNING=1` で false)。
     pub learning_enabled: bool,
     /// カタカナ語 -> 英語の表 (`SHIZUKU_LOANWORDS`、無ければアプリバンドルの Resources)。
     pub loanwords_path: Option<PathBuf>,
@@ -64,11 +64,11 @@ pub fn init(config: Config) {
 /// `init` 済みならその設定、まだなら `inert()` (ユニットテストが環境や HOME に触れないように)。
 pub fn get() -> &'static Config {
     CONFIG.get().unwrap_or_else(|| {
-        // init 前に読んだ値は LazyLock の表や学習ストアに残り、後から init しても直らない。黙って無効にならないよう 1 度だけ残す。
+        // init 前に読んだ値は LazyLock の表や記憶ストアに残り、後から init しても直らない。黙って無効にならないよう 1 度だけ残す。
         #[cfg(not(test))]
         {
             static WARNED: std::sync::Once = std::sync::Once::new();
-            WARNED.call_once(|| crate::platform::log("config: read before init; learning and tables are disabled"));
+            WARNED.call_once(|| crate::platform::log("config: read before init; memory and tables are disabled"));
         }
         INERT.get_or_init(Config::inert)
     })
@@ -86,9 +86,9 @@ mod tests {
     }
 
     #[test]
-    fn 学習データの置き場所は設定の_memory_dir_の下になる() {
+    fn 記憶の置き場所は設定の_memory_dir_の下になる() {
         let c = Config { memory_dir: Some(PathBuf::from("/tmp/m")), ..Config::inert() };
-        assert_eq!(crate::kkc::learning_dir(&c), Some(PathBuf::from("/tmp/m/rust-learning")));
-        assert_eq!(crate::kkc::learning_dir(&Config::inert()), None);
+        assert_eq!(crate::english_memory::memory_dir(&c), Some(PathBuf::from("/tmp/m/rust-learning")));
+        assert_eq!(crate::english_memory::memory_dir(&Config::inert()), None);
     }
 }

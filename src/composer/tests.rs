@@ -6,7 +6,6 @@ use std::rc::Rc;
 #[derive(Clone, Default)]
 struct Log {
     converts: Rc<RefCell<Vec<(u64, String)>>>,
-    selects: Rc<RefCell<Vec<(u64, usize)>>>,
     cancels: Rc<RefCell<usize>>,
     /// 表の読みのほかに、辞書の見出しとして答える読み。
     headwords: Rc<RefCell<Vec<String>>>,
@@ -40,10 +39,6 @@ impl CandidateEngine for MockEngine {
         }
         vec![format!("{}K1", hiragana), format!("{}K2", hiragana)]
     }
-    fn select(&mut self, revision: u64, engine_index: usize) -> bool {
-        self.log.selects.borrow_mut().push((revision, engine_index));
-        true
-    }
     fn cancel(&mut self) {
         *self.log.cancels.borrow_mut() += 1;
     }
@@ -72,15 +67,10 @@ impl Composer<MockEngine, FakeLexicon> {
     }
 }
 
-/// Session が学習を許可して確定するときと同じ engine の扱い (select か cancel)。
-fn commit_learning(c: &mut Composer<MockEngine, FakeLexicon>) -> String {
-    let Committed { text, engine, .. } = c.commit();
-    match engine {
-        Some((generation, EngineRank(i))) => {
-            c.engine_mut().select(generation, i);
-        }
-        None => c.engine_mut().cancel(),
-    }
+/// Session が確定するときと同じ engine の扱い (cancel)。
+fn commit_text(c: &mut Composer<MockEngine, FakeLexicon>) -> String {
+    let Committed { text, .. } = c.commit();
+    c.engine_mut().cancel();
     text
 }
 
@@ -246,8 +236,8 @@ fn 変換候補が空ならひらがなとカタカナが候補になりrawは�
     assert_eq!(c.display(), "ぎ");
     assert_eq!(texts(&c), vec!["ぎ", "ギ", "gi"]);
     assert!(c.candidates().iter().all(|cand| cand.engine_rank().is_none()));
-    assert_eq!(commit_learning(&mut c), "ぎ");
-    assert_eq!(*c.engine_cancels(), 1, "学習しない");
+    assert_eq!(commit_text(&mut c), "ぎ");
+    assert_eq!(*c.engine_cancels(), 1, "確定で cancel する");
 }
 
 #[test]
@@ -394,9 +384,6 @@ impl CandidateEngine for WordsEngine {
         let texts = table.iter().map(|words| words.iter().map(|(surface, _)| surface.as_str()).collect()).collect();
         self.last = Some((revision, table));
         texts
-    }
-    fn select(&mut self, _revision: u64, _engine_index: usize) -> bool {
-        true
     }
     fn cancel(&mut self) {
         *self.cancels.borrow_mut() += 1;
@@ -547,7 +534,6 @@ fn 固定中の確定は表示のまま学習しない() {
     let mut c = pinned_sensei();
     let committed = c.commit();
     assert_eq!(committed.text, "先生");
-    assert_eq!(committed.engine, None);
     assert!(c.pin.is_none());
     assert!(c.is_empty());
 }
@@ -560,7 +546,6 @@ fn 固定と残りを含む確定は表示のまま学習しない() {
     let committed = c.commit();
     assert_eq!(committed.text, "先生後");
     assert_eq!(preview, "先生後");
-    assert_eq!(committed.engine, None);
 }
 
 #[test]
@@ -646,7 +631,6 @@ fn 固定中の大文字を含む確定は表示のまま学習しない() {
     c.push_literal("A");
     let committed = c.commit();
     assert_eq!(committed.text, "釘を打A");
-    assert_eq!(committed.engine, None);
 }
 
 #[test]
@@ -783,7 +767,6 @@ fn live中でも読みが2かな以下ならひらがなのまま確定する() 
     assert_wysiwyg(&c);
     let committed = c.commit();
     assert_eq!(committed.text, "せん");
-    assert_eq!(committed.engine, None);
 }
 
 #[test]
@@ -846,15 +829,6 @@ fn 非liveでは読みの長さに関わらずひらがなのまま() {
 }
 
 #[test]
-fn 固定していないlive中の確定は第1候補を学習対象にできる() {
-    let mut c = words_composer();
-    type_kaisha(&mut c);
-    let committed = c.commit();
-    assert_eq!(committed.text, "変かいしゃ");
-    assert_eq!(committed.engine.map(|(_, rank)| rank), Some(EngineRank(0)));
-}
-
-#[test]
 fn 変換中のbackspaceは未変換に戻る() {
     let (mut c, _) = composer();
     type_kyou(&mut c);
@@ -904,47 +878,41 @@ fn 候補選択は範囲内のみ成功し_テキスト指定でも選べる() {
 fn 未変換のままcommitすると生ひらがなを返しcancelする() {
     let (mut c, log) = composer();
     type_kyou(&mut c);
-    assert_eq!(commit_learning(&mut c), "きょう");
+    assert_eq!(commit_text(&mut c), "きょう");
     assert_eq!(*log.cancels.borrow(), 1);
-    assert!(log.selects.borrow().is_empty());
     assert!(c.is_empty());
     assert_eq!(c.raw(), "");
 }
 
 #[test]
-fn 選択中の候補をcommitしその元indexで学習する() {
-    let (mut c, log) = composer();
+fn 選択中の候補をcommitする() {
+    let (mut c, _) = composer();
     type_kyou(&mut c);
-    let generation = c.reading.generation;
     c.begin_conversion();
-    assert_eq!(commit_learning(&mut c), "今日");
-    assert_eq!(*log.selects.borrow(), vec![(generation, 0)]);
+    assert_eq!(commit_text(&mut c), "今日");
 
     type_kyou(&mut c);
     c.begin_conversion();
     c.select_candidate(2);
-    assert_eq!(commit_learning(&mut c), "京");
-    assert_eq!(log.selects.borrow().last().unwrap().1, 1);
+    assert_eq!(commit_text(&mut c), "京");
 }
 
 #[test]
-fn raw候補をcommitしても学習せずcancelする() {
+fn raw候補をcommitするとcancelする() {
     let (mut c, log) = composer();
     type_kyou(&mut c);
     c.begin_conversion();
     c.advance();
-    assert_eq!(commit_learning(&mut c), "kyou");
-    assert!(log.selects.borrow().is_empty());
+    assert_eq!(commit_text(&mut c), "kyou");
     assert_eq!(*log.cancels.borrow(), 1);
 }
 
 #[test]
-fn liveで変換前にcommitすると第1候補を学習して返す() {
-    let (mut c, log) = composer();
+fn liveで変換前にcommitすると第1候補を返す() {
+    let (mut c, _) = composer();
     c.set_live(true);
     type_kyou(&mut c);
-    assert_eq!(commit_learning(&mut c), "今日");
-    assert_eq!(log.selects.borrow().last().unwrap().1, 0);
+    assert_eq!(commit_text(&mut c), "今日");
 }
 
 #[test]
@@ -953,7 +921,7 @@ fn revert後のcommitは生ひらがなでcancelする() {
     c.set_live(true);
     type_kyou(&mut c);
     c.revert();
-    assert_eq!(commit_learning(&mut c), "きょう");
+    assert_eq!(commit_text(&mut c), "きょう");
     assert_eq!(*log.cancels.borrow(), 1);
 }
 
@@ -966,7 +934,7 @@ fn 英単語は変換せずそのまま表示しcommitする() {
     assert_eq!(c.display(), "Git");
     assert!(log.converts.borrow().is_empty());
     assert!(!c.begin_conversion());
-    assert_eq!(commit_learning(&mut c), "Git");
+    assert_eq!(commit_text(&mut c), "Git");
     assert_eq!(*log.cancels.borrow(), 1);
     assert_eq!(c.phase(), Phase::Empty);
 }
@@ -1005,7 +973,7 @@ fn typed_and_flushed(word: &str) -> Composer<MockEngine, FakeLexicon> {
 fn 変換しきれない子音が残る語はenterでrawのまま確定する() {
     let mut c = typed_and_flushed("enter");
     assert_eq!(c.phase(), Phase::Dangling);
-    assert_eq!(commit_learning(&mut c), "enter");
+    assert_eq!(commit_text(&mut c), "enter");
 }
 
 #[test]
@@ -1016,7 +984,7 @@ fn 変換しきれない子音が残る語はspaceでrawが第1候補になり�
     assert_eq!(c.display(), "github");
     assert_eq!(texts(&c)[0], "github");
     assert!(texts(&c).len() >= 2);
-    assert_eq!(commit_learning(&mut c), "github");
+    assert_eq!(commit_text(&mut c), "github");
     assert_eq!(*c.engine_cancels(), 1);
 }
 
@@ -1024,7 +992,7 @@ fn 変換しきれない子音が残る語はspaceでrawが第1候補になり�
 fn 末尾のnはかなのまま確定する() {
     let mut c = typed_and_flushed("kan");
     assert_eq!(c.phase(), Phase::Composing);
-    assert_eq!(commit_learning(&mut c), "かん");
+    assert_eq!(commit_text(&mut c), "かん");
 }
 
 #[test]
@@ -1051,7 +1019,7 @@ fn 変換しきれない語に続く句読点はrawを確定してからasciiで
         action_for(c.phase(), Key::Punct),
         Action::CommitThenInsert
     );
-    assert_eq!(format!("{}{}", commit_learning(&mut c), "."), "enter.");
+    assert_eq!(format!("{}{}", commit_text(&mut c), "."), "enter.");
 }
 
 #[test]
@@ -1063,7 +1031,7 @@ fn 子音が残る語のbackspace後も残りがあれば英単語のまま() {
     c.backspace_romaji();
     c.push_flush(conv.flush());
     assert_eq!(c.phase(), Phase::Dangling);
-    assert_eq!(commit_learning(&mut c), "enter");
+    assert_eq!(commit_text(&mut c), "enter");
 }
 
 fn type_symbol(c: &mut Composer<MockEngine, FakeLexicon>, ascii: &str) {
@@ -1078,13 +1046,12 @@ fn 記号1つの組成は既定の和文表記を表示し_enterでそのまま�
     assert_eq!(c.phase(), Phase::Composing);
     assert_eq!(c.display(), "「");
     assert!(log.converts.borrow().is_empty());
-    assert_eq!(commit_learning(&mut c), "「");
-    assert!(log.selects.borrow().is_empty());
+    assert_eq!(commit_text(&mut c), "「");
 }
 
 #[test]
 fn 記号だけの変換は異体の表から候補を出し_rawは足さず_学習もしない() {
-    let (mut c, log) = composer();
+    let (mut c, _) = composer();
     type_symbol(&mut c, "[");
     assert!(c.is_symbol());
     assert!(c.begin_conversion());
@@ -1094,8 +1061,7 @@ fn 記号だけの変換は異体の表から候補を出し_rawは足さず_学
     );
     assert!(c.advance());
     assert_eq!(c.display(), "『");
-    assert_eq!(commit_learning(&mut c), "『");
-    assert!(log.selects.borrow().is_empty());
+    assert_eq!(commit_text(&mut c), "『");
     assert_eq!(*c.engine_cancels(), 1);
 }
 
@@ -1107,7 +1073,7 @@ fn 記号の候補は戻りと番号選択でも選べる() {
     assert!(c.retreat());
     assert_eq!(c.display(), ".");
     assert!(c.select_candidate(1));
-    assert_eq!(commit_learning(&mut c), "．");
+    assert_eq!(commit_text(&mut c), "．");
 }
 
 #[test]
@@ -1134,7 +1100,7 @@ fn 記号の直後の1文字だけのローマ字でも組成が続く() {
     type_word(&mut c, &mut conv, "a");
     c.push_flush(conv.flush());
     assert_eq!(c.hiragana, "（あ");
-    assert_eq!(commit_learning(&mut c), "（あ");
+    assert_eq!(commit_text(&mut c), "（あ");
 }
 
 #[test]
@@ -1165,20 +1131,19 @@ fn 記号は英単語入力の英字とは混ざらない() {
     let mut c = typed_and_flushed("world");
     assert_eq!(c.phase(), Phase::Dangling);
     assert!(!c.is_symbol());
-    assert_eq!(commit_learning(&mut c), "world");
+    assert_eq!(commit_text(&mut c), "world");
 }
 
 #[test]
 fn 字種変換は組成全体を指定の字種で表示し_確定しても学習しない() {
-    let (mut c, log) = composer();
+    let (mut c, _) = composer();
     type_kyou(&mut c);
     assert!(c.transliterate(Form::Katakana));
     assert_eq!(c.phase(), Phase::Transliterated(Form::Katakana));
     assert_eq!(c.display(), "キョウ");
     assert!(c.transliterate(Form::FullAlnum(translit::Case::Lower)));
     assert_eq!(c.display(), "ｋｙｏｕ");
-    assert_eq!(commit_learning(&mut c), "ｋｙｏｕ");
-    assert!(log.selects.borrow().is_empty());
+    assert_eq!(commit_text(&mut c), "ｋｙｏｕ");
     assert_eq!(c.phase(), Phase::Empty);
 }
 
@@ -1241,7 +1206,7 @@ fn 字種変換のあとescでひらがなへ戻りbackspaceは1文字削る() {
 
 #[test]
 fn discardは組成を何も確定せず捨てて学習もしない() {
-    let (mut c, log) = composer();
+    let (mut c, _) = composer();
     type_kyou(&mut c);
     c.begin_conversion();
     c.discard();
@@ -1249,7 +1214,6 @@ fn discardは組成を何も確定せず捨てて学習もしない() {
     assert!(c.is_empty());
     assert_eq!(c.raw(), "");
     assert!(c.candidates().is_empty());
-    assert!(log.selects.borrow().is_empty());
 }
 
 #[test]
@@ -1284,7 +1248,7 @@ fn 取り消しても_literal_のままで確定は英字になる() {
     c.transliterate(Form::Katakana);
     c.revert();
     assert_eq!(c.phase(), Phase::Literal);
-    assert_eq!(commit_learning(&mut c), "Tokyo");
+    assert_eq!(commit_text(&mut c), "Tokyo");
 }
 
 #[test]
@@ -1364,14 +1328,13 @@ fn live中の英語分割は未確定のローマ字だけが動く打鍵では�
 
 #[test]
 fn live中の英語分割はenterで表示どおりに確定し学習する() {
-    let (mut c, log) = live_split_composer();
+    let (mut c, _) = live_split_composer();
     type_keys(&mut c, "artifactwoko");
     let shown = c.preedit();
     c.flush_romaji();
     assert_eq!(c.phase(), Phase::Mixed);
-    assert_eq!(commit_learning(&mut c), shown);
+    assert_eq!(commit_text(&mut c), shown);
     assert_eq!(shown, "artifactをこK1");
-    assert_eq!(log.selects.borrow().len(), 1);
 }
 
 #[test]
@@ -1384,11 +1347,10 @@ fn live中の英語分割はbackspaceで読みを1文字ずつ戻す() {
 
 #[test]
 fn live中の英語分割を表示している間は候補を選んでも確定も学習もしない() {
-    let (mut c, log) = live_split_composer();
+    let (mut c, _) = live_split_composer();
     type_keys(&mut c, "artifactwoko");
     assert!(c.candidates().is_empty());
     assert!(!c.select_candidate(0));
-    assert!(log.selects.borrow().is_empty());
 }
 
 #[test]
@@ -1399,7 +1361,7 @@ fn live中の英語分割に付いた末尾の子音は_見えている分割の
     let shown = c.preedit();
     assert_eq!(shown, "artifactをk");
     c.flush_romaji_for_commit();
-    assert_eq!(commit_learning(&mut c), shown);
+    assert_eq!(commit_text(&mut c), shown);
 }
 
 fn live_kyou_composer() -> (Composer<MockEngine, FakeLexicon>, Log) {
@@ -1435,24 +1397,21 @@ fn live中のかなに続く英字を足し引きしても_かなの変換は変
 }
 
 #[test]
-fn live中のかなに続く英字のenterは_かな部分の変換を学習する() {
-    let (mut c, log) = live_kyou_composer();
+fn live中のかなに続く英字のenterは_かな部分の変換を確定する() {
+    let (mut c, _) = live_kyou_composer();
     c.push_literal("OK");
-    let (revision, _) = log.converts.borrow().last().cloned().expect("converted");
-    assert_eq!(commit_learning(&mut c), "今日OK");
-    assert_eq!(*log.selects.borrow(), vec![(revision, 0)]);
+    assert_eq!(commit_text(&mut c), "今日OK");
 }
 
 #[test]
 fn live中のかなが2かな以下なら_英字が続いてもひらがなのまま学習しない() {
-    let (mut c, log) = composer();
+    let (mut c, _) = composer();
     c.set_live(true);
     c.push_input("i", "い", "");
     c.push_literal("Phone");
     assert_eq!(c.preedit(), "いPhone");
     assert_eq!(c.commit_preview(), "いPhone");
-    assert_eq!(commit_learning(&mut c), "いPhone");
-    assert!(log.selects.borrow().is_empty());
+    assert_eq!(commit_text(&mut c), "いPhone");
 }
 
 #[test]
@@ -1538,13 +1497,12 @@ fn スペース変換の英語分割は変換せずに英単語とかなを表�
 
 #[test]
 fn mixedの変換はかな混じりが第1候補でrawがその直後に並ぶ() {
-    let (mut c, log) = composer();
+    let (mut c, _) = composer();
     c.push_input("i", "い", "");
     c.push_literal("Phone");
     assert!(c.begin_conversion());
     assert_eq!(texts(&c), vec!["いPhone", "iPhone"]);
-    assert_eq!(commit_learning(&mut c), "いPhone");
-    assert!(log.selects.borrow().is_empty());
+    assert_eq!(commit_text(&mut c), "いPhone");
 }
 
 #[test]
@@ -1621,8 +1579,7 @@ fn 英単語候補を選んで確定するとその文字列が出て学習し�
     c.begin_conversion();
     assert!(c.advance());
     assert_eq!(c.display(), "desktop");
-    assert_eq!(commit_learning(&mut c), "desktop");
-    assert!(c.engine.log.selects.borrow().is_empty());
+    assert_eq!(commit_text(&mut c), "desktop");
 }
 
 #[test]
@@ -1734,8 +1691,7 @@ fn 絵文字を選んで確定するとその文字列が出て学習しない()
     c.begin_conversion();
     let index = texts(&c).iter().position(|t| *t == "🍻").unwrap();
     assert!(c.select_candidate(index));
-    assert_eq!(commit_learning(&mut c), "🍻");
-    assert!(c.engine.log.selects.borrow().is_empty());
+    assert_eq!(commit_text(&mut c), "🍻");
 }
 
 #[test]
@@ -2285,38 +2241,6 @@ fn n_の有無が変わる打鍵でだけ変換し直す() {
 }
 
 #[test]
-fn n_のあとの確定は変換した読みと順位を学習に渡す() {
-    // 学習は (世代, 順位) で engine の直近の変換を引く。ん を足した変換が直近に残っていてはいけない。
-    for (live, keys, backspaces, reading) in [
-        (false, "shinbun", 0, "しんぶん"),
-        (false, "shinbun", 1, "しんぶ"),
-        (false, "shinbuna", 0, "しんぶな"),
-        (true, "shinbun", 0, "しんぶん"),
-        (true, "shinbun", 1, "しんぶ"),
-        (true, "shinbuna", 0, "しんぶな"),
-    ] {
-        let (mut c, log) = composer();
-        c.set_live(live);
-        type_keys(&mut c, keys);
-        for _ in 0..backspaces {
-            c.backspace_romaji();
-        }
-        c.flush_romaji();
-        if !live {
-            assert!(c.begin_conversion());
-            assert!(c.advance());
-        }
-        let Committed { text, engine, .. } = c.commit();
-        let (revision, EngineRank(rank)) = engine.unwrap_or_else(|| panic!("{keys} {backspaces} live={live}: 学習対象がある"));
-        let (last_revision, last_reading) = log.converts.borrow().last().cloned().expect("converted");
-        assert_eq!(revision, last_revision, "{keys} {backspaces} live={live}: 直近の変換の世代");
-        assert_eq!(last_reading, reading, "{keys} {backspaces} live={live}");
-        assert_eq!(text, format!("{reading}K{}", rank + 1), "{keys} {backspaces} live={live}: 順位が確定した候補を指す");
-        assert_eq!(rank, usize::from(!live), "{keys} {backspaces} live={live}");
-    }
-}
-
-#[test]
 fn 固定中の_ん_は残りの読みに足して変換し_固定は保たれる() {
     let mut c = pinned_sensei();
     assert_eq!(c.rest(), "");
@@ -2337,7 +2261,6 @@ fn 固定中の_ん_は残りの読みに足して変換し_固定は保たれ�
     c.flush_romaji();
     let committed = c.commit();
     assert_eq!(committed.text, "先生変ん");
-    assert_eq!(committed.engine, None, "固定を含む確定は学習しない");
 }
 
 /// 辞書の英単語を `is_word` で決める composer。
