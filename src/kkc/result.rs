@@ -523,7 +523,7 @@ mod tests {
         // ノードが無い (EOS に繋がらない) ラティス
         let mut cache = super::super::lattice::LookupCache::new();
         let mut l = Lattice::build(&dict, &mut cache, &super::super::learning::Learning::disabled(), &super::super::lattice::ExtraWords::default(), &[]);
-        l.run(&dict, 9);
+        l.run(&dict, 9, None);
         let r = process(&dict, &l, "キョウ");
         let texts: Vec<&str> = r.main.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, vec!["キョウ", "きょう"]);

@@ -196,6 +196,9 @@ pub struct Lattice {
     surface_count: usize,
 }
 
+/// `Lattice::run` の `open_from` 以降も上限を外さないのは、句読点 1 文字に要素が複数あり、句読点が続くと経路が文字ごとに倍々に増えるため (！？！？… で固まる)。
+const OPEN_N_BEST: usize = 512;
+
 impl Lattice {
     /// `memory` の学習エントリと `extra` の語も辞書の語と同じようにノードにする (辞書の語のあとに並べる。`extra` は同じ語・読みが辞書にあれば足さない)。`chars` はカタカナ化済みの読み。
     pub fn build(dict: &Dictionary, cache: &mut LookupCache, memory: &Learning, extra: &ExtraWords, chars: &[char]) -> Self {
@@ -262,7 +265,7 @@ impl Lattice {
     }
 
     /// `kana2lattice_all` の本体。
-    pub fn run(&mut self, dict: &Dictionary, n_best: usize) {
+    pub fn run(&mut self, dict: &Dictionary, n_best: usize, open_from: Option<usize>) {
         for start in 0..self.surface_count {
             let is_head = start == 0;
             for idx in self.ranges[start].clone() {
@@ -297,7 +300,7 @@ impl Lattice {
                         self.eos.push(id);
                     }
                 } else {
-                    self.update_next_nodes(dict, idx, &elem, &values, end, n_best);
+                    self.update_next_nodes(dict, idx, &elem, &values, end, if open_from.is_some_and(|from| end >= from) { OPEN_N_BEST.max(n_best) } else { n_best });
                 }
             }
         }
@@ -488,7 +491,7 @@ mod tests {
             (1, 2, elem("い", "イ", 1288, 1288, 501, -1.0)),
         ];
         let mut l = manual(2, defs);
-        l.run(&dict, 2);
+        l.run(&dict, 2, None);
         // n_best 2: 上位 2 つ (-3, -4 を含む経路) だけが残る
         let t = totals(&l, 4);
         assert_eq!(t.len(), 2);
@@ -507,7 +510,7 @@ mod tests {
             (1, 2, elem("い", "イ", 1288, 1288, 501, -1.0)),
         ];
         let mut l = manual(2, defs);
-        l.run(&dict, 9);
+        l.run(&dict, 9, None);
         // 同値は後から来たものほど後ろ (lastIndex(where: >=) + 1)
         let order: Vec<String> = l.nodes[4]
             .prevs
@@ -523,7 +526,7 @@ mod tests {
             (1, 2, elem("い", "イ", 1288, 1288, 501, -1.0)),
         ];
         let mut l = manual(2, defs);
-        l.run(&dict, 2);
+        l.run(&dict, 2, None);
         let order: Vec<String> = l.nodes[4]
             .prevs
             .iter()
@@ -542,7 +545,7 @@ mod tests {
             (1, 2, elem("い", "イ", 1288, 1288, 501, -1.0)),
         ];
         let mut l = manual(2, defs);
-        l.run(&dict, 9);
+        l.run(&dict, 9, None);
         assert_eq!(l.eos.len(), 1);
         let words: Vec<String> = l.candidate_data()[0].data.iter().map(|e| e.word.clone()).collect();
         assert_eq!(words, vec!["あ", "い"]);
@@ -553,7 +556,7 @@ mod tests {
         let dict = Dictionary::open_default().unwrap();
         let defs = vec![(0, 1, elem("あ", "ア", 1288, 1288, 501, -5.0))];
         let mut l = manual(1, defs);
-        l.run(&dict, 9);
+        l.run(&dict, 9, None);
         let expect = 0.0 + -5.0 + dict.cc(0, 1288);
         assert_eq!(l.regs[l.eos[0] as usize].total.to_bits(), expect.to_bits());
     }
@@ -568,7 +571,7 @@ mod tests {
             (2, 3, elem("晴れ", "ハレ", 1288, 1288, 30, -4.0)),
         ];
         let mut l = manual(3, defs);
-        l.run(&dict, 9);
+        l.run(&dict, 9, None);
         let cd = &l.candidate_data()[0];
         // 今日+は | 晴れ
         assert_eq!(cd.clauses.len(), 2);

@@ -124,6 +124,10 @@ impl KkcCore {
 
     /// 読み全体を変換する。結果の全件 (`mainResults` / `firstClauseResults`)。毎回ラティスを作り直す。
     pub fn convert_all(&self, reading: &str) -> Converted {
+        self.convert_all_open_tail(reading, None)
+    }
+
+    pub fn convert_all_open_tail(&self, reading: &str, open_from: Option<usize>) -> Converted {
         if reading.is_empty() {
             return Converted::default();
         }
@@ -131,7 +135,7 @@ impl KkcCore {
         let chars: Vec<char> = katakana.chars().collect();
         let learning = self.learning.borrow();
         let mut lat = lattice::Lattice::build(&self.dict, &mut self.cache.borrow_mut(), &learning, &self.extra, &chars);
-        lat.run(&self.dict, N_BEST);
+        lat.run(&self.dict, N_BEST, open_from);
         result::process(&self.dict, &lat, &katakana)
     }
 }
@@ -265,7 +269,7 @@ fn is_permutation(order: &[usize], n: usize) -> bool {
 /// 先頭の `top` (打ち切り済み) は動かさない。スコアは元の候補から `PENALTY` 引く。審判がなければ元の全文候補の後ろに並ぶ。
 /// 読みが 〜なそう (+ 短い続き) で終わるときは、〜ない を変換して ない を なそう に替えた候補も足す (`nasou_candidates`)。
 /// 戻り値は 〜なそう の動詞形 (すでにあるものも含む) の表記を、最優先の順に並べたもの (`promote_derived` が使う)。
-fn add_variants(core: &KkcCore, top: &mut Vec<result::Cand>, katakana: &str) -> Vec<String> {
+fn add_variants(core: &KkcCore, top: &mut Vec<result::Cand>, katakana: &str, trailing_punct: &str) -> Vec<String> {
     let full: Vec<usize> = (0..top.len()).filter(|&i| top[i].source == result::Source::Full).collect();
     let Some(&last_full) = full.last() else {
         return Vec::new();
@@ -281,7 +285,7 @@ fn add_variants(core: &KkcCore, top: &mut Vec<result::Cand>, katakana: &str) -> 
         })
         .collect();
     exclude.extend(cands.iter().map(|c| c.text.replace('\u{1F}', "")));
-    let (added, preferred) = nasou_candidates(core, katakana, &exclude);
+    let (added, preferred) = nasou_candidates(core, katakana, trailing_punct, &exclude);
     cands.extend(added);
     top.splice(last_full + 1..last_full + 1, cands);
     preferred
@@ -291,10 +295,14 @@ fn add_variants(core: &KkcCore, top: &mut Vec<result::Cand>, katakana: &str) -> 
 /// 辞書は 翁 (おきな) が 起き+な より強く、おきなそう の候補に 起きなそう が出ないため。エンジンの順位は変えず、審判が他の全文候補と並べる。
 /// 該当する読みのときだけ余分に 1 回変換する。`MAX_VARIANTS` とは別枠なので他の派生に押し出されない。
 /// 戻り値の 2 つ目は、動詞形の表記を ない 変換の順に並べたもの。`exclude` にある (エンジンがすでに出している) ものも含む。
-fn nasou_candidates(core: &KkcCore, katakana: &str, exclude: &HashSet<String>) -> (Vec<result::Cand>, Vec<String>) {
-    let Some((negative, tail)) = variants::nasou_split(katakana) else {
+fn nasou_candidates(core: &KkcCore, katakana: &str, trailing_punct: &str, exclude: &HashSet<String>) -> (Vec<result::Cand>, Vec<String>) {
+    let Some((negative, tail)) = katakana.strip_suffix(trailing_punct).and_then(variants::nasou_split) else {
         return (Vec::new(), Vec::new());
     };
+    let Some(punct_elems) = core.punct_elems(trailing_punct) else {
+        return (Vec::new(), Vec::new());
+    };
+    let exclude: HashSet<String> = exclude.iter().filter_map(|t| t.strip_suffix(trailing_punct)).map(str::to_string).collect();
     let converted = core.convert_all(&negative);
     let alt: Vec<(f32, &[Rc<elem::Elem>])> = converted
         .main
@@ -306,7 +314,7 @@ fn nasou_candidates(core: &KkcCore, katakana: &str, exclude: &HashSet<String>) -
         .collect();
     let lookup = |ruby: &str| core.headwords(ruby);
     let mut preferred: Vec<String> = variants::nasou_variants(&alt, tail, &HashSet::new(), variants::ORIGINS, &lookup).into_iter().map(|(_, v)| v.text).collect();
-    let added: Vec<result::Cand> = variants::nasou_variants(&alt, tail, exclude, variants::NASOU_MAX, &lookup)
+    let mut added: Vec<result::Cand> = variants::nasou_variants(&alt, tail, &exclude, variants::NASOU_MAX, &lookup)
         .into_iter()
         .map(|(score, v)| result::Cand::new(v.text, score - variants::PENALTY, v.data, result::Source::Full))
         .collect();
@@ -315,6 +323,8 @@ fn nasou_candidates(core: &KkcCore, katakana: &str, exclude: &HashSet<String>) -
             preferred.push(c.text.clone());
         }
     }
+    added.iter_mut().for_each(|c| append_punct(core, c, trailing_punct, &punct_elems));
+    preferred.iter_mut().for_each(|text| text.push_str(trailing_punct));
     (added, preferred)
 }
 
@@ -357,6 +367,47 @@ fn append_tail(top: &mut Vec<result::Cand>, rest: &[result::Cand], katakana: &st
     }
 }
 
+const TRAILING_PUNCT: &str = "。、？！」』";
+
+fn body_before_punct(reading: &str) -> Option<&str> {
+    let body = reading.trim_end_matches(|c| TRAILING_PUNCT.contains(c));
+    (body.len() < reading.len() && body.chars().next_back().is_some_and(variants::is_kana)).then_some(body)
+}
+
+impl KkcCore {
+    fn punct_elems(&self, trailing_punct: &str) -> Option<Vec<Rc<elem::Elem>>> {
+        trailing_punct.chars()
+            .map(|c| {
+                let word = c.to_string();
+                self.headwords(&word)
+                    .into_iter()
+                    .filter(|e| e.word == word)
+                    .map(|e| elem::Elem::new(e.word, e.ruby, usize::from(e.lcid), usize::from(e.rcid), usize::from(e.mid), e.value))
+                    .filter(|e| !e.removed)
+                    .max_by(|a, b| a.base.total_cmp(&b.base))
+                    .map(Rc::new)
+            })
+            .collect()
+    }
+}
+
+fn append_punct(core: &KkcCore, cand: &mut result::Cand, trailing_punct: &str, elems: &[Rc<elem::Elem>]) {
+    cand.text.push_str(trailing_punct);
+    for e in elems {
+        if let Some(prev) = cand.data.last() {
+            cand.value += core.dict.cc(prev.rcid, e.lcid);
+        }
+        cand.value += e.value();
+        cand.ruby_count += e.ruby_len;
+        cand.data.push(e.clone());
+    }
+}
+
+fn without_trailing_punct(data: &[Rc<elem::Elem>]) -> &[Rc<elem::Elem>] {
+    let is_punct = |e: &Rc<elem::Elem>| e.ruby.chars().all(|c| TRAILING_PUNCT.contains(c));
+    data.iter().rposition(|e| !is_punct(e)).map_or(data, |last| &data[..=last])
+}
+
 impl Default for RustEngine {
     fn default() -> Self {
         Self::new()
@@ -373,10 +424,11 @@ impl CandidateEngine for RustEngine {
         if hiragana.is_empty() {
             return Vec::new();
         }
-        let converted = core.convert_all(hiragana);
+        let body = body_before_punct(hiragana);
+        let converted = core.convert_all_open_tail(hiragana, body.map(|b| b.chars().count()));
         let mut top: Vec<result::Cand> = converted.main[..converted.main.len().min(TOP_N)].to_vec();
         let katakana = dict::to_katakana(hiragana);
-        let preferred = add_variants(core, &mut top, &katakana);
+        let preferred = add_variants(core, &mut top, &katakana, body.map_or("", |b| &hiragana[b.len()..]));
         let head_len = top.len();
         append_tail(&mut top, &converted.main[converted.main.len().min(TOP_N)..], &katakana);
         let mut order: Vec<usize> = (0..top.len()).collect();
@@ -404,7 +456,7 @@ impl CandidateEngine for RustEngine {
         };
         match candidates.get(engine_index) {
             Some(data) if r == revision => {
-                core.learn(data);
+                core.learn(without_trailing_punct(data));
                 true
             }
             _ => false,
@@ -923,6 +975,18 @@ mod tests {
     }
 
     #[test]
+    fn 末尾に句読点が付いても_動詞形が先頭で_残りは審判の順() {
+        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        for (reading, want, noun) in [("おきなそうだ。", "起きなそうだ。", "翁そうだ。"), ("みなそう！", "見なそう！", "皆そう！")] {
+            let mut e = RustEngine::with_core(core.clone()).with_judge(noun_first_judge);
+            let shown = e.convert(1, reading);
+            assert_eq!(shown[0], want, "{reading}: {shown:?}");
+            assert!(index_of(&shown, noun) >= 1, "{reading}: {shown:?}");
+            assert_eq!(shown.iter().filter(|t| *t == want).count(), 1, "{reading}");
+        }
+    }
+
+    #[test]
     fn 先頭を替えても学習用の添字は表示とずれない() {
         let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
         let mut e = RustEngine::with_core(core).with_judge(noun_first_judge);
@@ -994,7 +1058,7 @@ mod tests {
             let main = core.convert_all(reading).main;
             let mut top: Vec<result::Cand> = main[..main.len().min(TOP_N)].to_vec();
             let before = top.len();
-            add_variants(&core, &mut top, &dict::to_katakana(reading));
+            add_variants(&core, &mut top, &dict::to_katakana(reading), "");
             let added = top.len() - before;
             assert!(added <= variants::MAX_VARIANTS, "{reading}: {added}");
         }
@@ -1045,7 +1109,7 @@ mod tests {
     fn head_len(core: &Rc<KkcCore>, reading: &str) -> usize {
         let converted = core.convert_all(reading);
         let mut top: Vec<result::Cand> = converted.main[..converted.main.len().min(TOP_N)].to_vec();
-        add_variants(core, &mut top, &dict::to_katakana(reading));
+        add_variants(core, &mut top, &dict::to_katakana(reading), "");
         top.len()
     }
 
@@ -1123,6 +1187,141 @@ mod tests {
         let now = after.iter().position(|t| *t == shown[i]).expect("まだ表示される");
         assert!(now < i, "{now} < {i}");
     }
+
+    fn judged_pool(core: &Rc<KkcCore>, reading: &str) -> Vec<(String, f32)> {
+        thread_local! {
+            static POOL: RefCell<Vec<(String, f32)>> = const { RefCell::new(Vec::new()) };
+        }
+        fn record(_context: &str, texts: &[&str], scores: &[f32]) -> Option<Vec<usize>> {
+            POOL.with(|p| *p.borrow_mut() = texts.iter().map(|t| t.to_string()).zip(scores.iter().copied()).collect());
+            None
+        }
+        RustEngine::with_core(core.clone()).with_judge(record).convert(1, reading);
+        POOL.with(|p| p.borrow().clone())
+    }
+
+    fn lattice_first(core: &KkcCore, reading: &str) -> (String, f32) {
+        let first = core.convert_all(reading).main.into_iter().find(|c| c.source == result::Source::Full).expect("全文候補がある");
+        (first.text.replace('\u{1F}', ""), first.value)
+    }
+
+    const WIDE_N_BEST: usize = 80;
+
+    fn wide_lattice_full(core: &KkcCore, reading: &str) -> Vec<(String, f32)> {
+        let katakana = dict::to_katakana(reading);
+        let chars: Vec<char> = katakana.chars().collect();
+        let learning = core.learning.borrow();
+        let mut lat = lattice::Lattice::build(&core.dict, &mut core.cache.borrow_mut(), &learning, &core.extra, &chars);
+        lat.run(&core.dict, WIDE_N_BEST, None);
+        let main = result::process(&core.dict, &lat, &katakana).main;
+        main.into_iter().filter(|c| c.source == result::Source::Full).map(|c| (c.text.replace('\u{1F}', ""), c.value)).collect()
+    }
+
+    const PUNCTUATED: [&str; 12] = [
+        "こうえんをきく。",
+        "あめがふりそうだからかさをもっていって。",
+        "こんにちは。げんきですか？",
+        "おおいた！",
+        "そういえばきのうはなんしたの？",
+        "はしをわたってまっすぐいく。",
+        "ばすていまでいっしょにいこう、",
+        "おおさかじょ？",
+        "きょうはいいてんきですね。",
+        "あしたはあめだ。あさってははれだ。",
+        "このぷろぐらむはどうさどするの！？",
+        "「きょうはあめ」といった。",
+    ];
+
+    #[test]
+    fn the_connection_cost_to_the_punctuation_orders_the_full_candidates() {
+        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let mut e = RustEngine::with_core(core).with_judge(no_judge);
+        assert_eq!(e.convert(1, "きょう")[0], "強");
+        assert_eq!(e.convert(2, "きょう、")[0], "今日、");
+    }
+
+    #[test]
+    fn a_split_that_connects_better_to_the_punctuation_is_not_lost_before_it_is_scored() {
+        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
+        assert_eq!(e.convert(1, "こんにちは。げんきですか？")[0], "こんにちは。元気ですか？");
+        assert_eq!(e.convert(2, "おおいた！")[0], "大分！");
+        for reading in PUNCTUATED {
+            let pool = judged_pool(&core, reading);
+            assert!(pool[0].1 >= lattice_first(&core, reading).1 - 1e-4, "{reading}: {pool:?}");
+        }
+    }
+
+    #[test]
+    fn a_punctuated_reading_is_ranked_as_a_lattice_with_room_for_every_path() {
+        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        for reading in ["おおさかじょ？", "ごおんじょ。", "さいれんらく！", "おおいた！", "きょう、"] {
+            assert_eq!(judged_pool(&core, reading), wide_lattice_full(&core, reading), "{reading}");
+        }
+    }
+
+    #[test]
+    fn a_candidate_is_never_scored_below_what_the_lattice_gives_the_same_text() {
+        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        for reading in PUNCTUATED {
+            let pool = judged_pool(&core, reading);
+            let main = core.convert_all(reading).main;
+            let mut compared = 0;
+            for c in main.iter().filter(|c| c.source == result::Source::Full) {
+                let text = c.text.replace('\u{1F}', "");
+                if let Some((_, score)) = pool.iter().find(|(t, _)| *t == text) {
+                    assert!(*score >= c.value - 1e-4, "{reading} {text}: {score} < {}", c.value);
+                    compared += 1;
+                }
+            }
+            assert!(compared >= 1, "{reading}: 比べられる候補がない {pool:?}");
+        }
+    }
+
+    #[test]
+    fn the_judge_scores_the_full_candidates_with_their_trailing_punctuation() {
+        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        for (reading, right) in [("こうえんをきく。", "講演を聞く。"), ("あめがふりそうだからかさをもっていって。", "雨が降りそうだから傘を持っていって。")] {
+            let shown = RustEngine::with_core(core.clone()).with_judge(no_judge).convert(1, reading);
+            let judged: Vec<String> = judged_pool(&core, reading).into_iter().map(|(t, _)| t).collect();
+            assert!(judged.iter().all(|t| t.ends_with('。')), "{judged:?}");
+            assert!(judged.contains(&right.to_string()), "{reading}: 正解の候補が審判に届く: {judged:?}");
+            assert!(judged.iter().all(|t| shown.contains(t)), "審判にかけた文が表示される: {judged:?} {shown:?}");
+        }
+    }
+
+    #[test]
+    fn a_punctuated_candidate_keeps_the_punctuation_in_its_words_and_is_learned_without_it() {
+        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
+        let shown = e.convert(1, "こうえんをきく。");
+        let i = index_of(&shown, "公演を聴く。");
+        let words = e.words(1, i).unwrap();
+        assert_eq!(words.iter().map(|(w, _)| w.as_str()).collect::<String>(), "公演を聴く。");
+        assert_eq!(words.iter().map(|(_, r)| r.as_str()).collect::<String>(), "コウエンヲキク。");
+        assert_eq!(words.last().map(|(w, r)| (w.as_str(), r.as_str())), Some(("。", "。")));
+        assert_ne!(shown[0], "公演を聴く。", "前提: 選ぶ前は先頭ではない");
+        assert!(e.select(1, i));
+        let mut after = RustEngine::with_core(core).with_judge(no_judge);
+        assert_eq!(after.convert(2, "こうえんをきく。")[0], "公演を聴く。");
+        assert_eq!(after.convert(3, "こうえんをきく")[0], "公演を聴く");
+        assert_eq!(after.convert(4, "こうえんをきく！")[0], "公演を聴く！");
+    }
+
+    #[test]
+    fn a_reading_without_kana_before_the_punctuation_converts_as_before() {
+        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
+        for reading in ["。", "！？", "「」", "『』", "1。", "abc。"] {
+            let shown = e.convert(1, reading);
+            let want: Vec<String> = core.convert_all(reading).main.iter().map(|c| c.text.replace('\u{1F}', "")).collect();
+            assert_eq!(shown, want[..shown.len().min(want.len())], "{reading}");
+        }
+        let shown = e.convert(2, "「」");
+        assert_eq!(shown.first().map(String::as_str), Some("「」"));
+        assert!(shown.contains(&"『』".to_string()), "{shown:?}");
+    }
+
     const KANA_WORDS: &str = "# 注釈\nリファクタ\nリベース\nabc\n";
 
     fn words_engine(words: &str) -> RustEngine {
