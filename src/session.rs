@@ -176,10 +176,14 @@ impl<E: CandidateEngine, L: Lexicon, M: EnglishMemory> Session<E, L, M> {
         }
         // 数字を含む開発用語 (md5) は、数字で組成を区切らない (区切ると Enter が素通しの改行になる)。
         let continues_word = matches!(key, Key::Digit(_)) && self.composer.digit_continues_dev_word(text);
-        let action = if (key == Key::Hyphen && self.composer.hyphen_continues_kana()) || continues_word {
+        let continues_kana = (key == Key::Hyphen && self.composer.hyphen_continues_kana()) || (key == Key::Punct && self.composer.punct_continues_kana());
+        let action = if continues_kana || continues_word {
             Action::TypeText
         } else {
-            keymap::action_for(phase, key)
+            match keymap::action_for(phase, key) {
+                Action::TypeRomaji | Action::TypeLiteral | Action::TypeText if self.composer.closed_by_punct_after_english_head() => Action::CommitThenRestart,
+                action => action,
+            }
         };
         if action == Action::CommitThenRestart {
             self.commit_and_insert(gates, "", &mut fx);
@@ -763,6 +767,99 @@ mod tests {
         let direct = drive(&mut d, "artifactni<bs><space>");
         assert_eq!(reverted, direct);
         assert_eq!(s.phase(), d.phase());
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct AfterEnter {
+        committed: String,
+        enter_handled: bool,
+    }
+
+    fn after_enter(committed: &str, enter_handled: bool) -> AfterEnter {
+        AfterEnter { committed: committed.to_string(), enter_handled }
+    }
+
+    fn committed_by_enter(mode: ConversionMode, keys: &str) -> AfterEnter {
+        let mut s = Session::new(Composer::new(NullEngine, FakeLexicon::default()), FakeMemory::default(), mode);
+        let (_, mut committed) = drive(&mut s, keys);
+        let enter = s.handle(&ALLOW, Key::Enter, "\r");
+        for effect in enter.effects {
+            if let Effect::Insert(text) = effect {
+                committed.push_str(&text);
+            }
+        }
+        AfterEnter { committed, enter_handled: enter.handled }
+    }
+
+    const MODES: [ConversionMode; 2] = [ConversionMode::Space, ConversionMode::Live];
+
+    #[test]
+    fn 英語分割の組成の句読点は和文で組成に残りenterは素通しの改行にならない() {
+        for mode in MODES {
+            for (key, kana) in [(".", "。"), (",", "、"), ("!", "！"), ("?", "？"), ("[", "「"), ("]", "」")] {
+                assert_eq!(committed_by_enter(mode, &format!("artifactni{key}")), after_enter(&format!("artifactに{kana}"), true), "{mode:?} {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn 英語分割の組成に足した句読点は変換を取り消しても消えない() {
+        let mut s = english_session();
+        assert_eq!(drive(&mut s, "artifactni.<space><esc>").0, "artifactに。");
+        assert_eq!(drive(&mut s, "<enter>").1, "artifactに。");
+    }
+
+    #[test]
+    fn 英語分割の組成に足した句読点のあとも英単語はエンジンに渡さない() {
+        let lexicon = FakeLexicon::default();
+        let memory = lexicon.memory();
+        let mut s = Session::new(Composer::new(RecordingEngine::default(), lexicon), memory, ConversionMode::Space);
+        for ch in "artifactni.".chars() {
+            s.handle(&ALLOW, classify(ch), &ch.to_string());
+        }
+        assert_eq!(s.candidate_texts(), ["artifactに。", "artifactx"]);
+    }
+
+    #[test]
+    fn 句読点で終わる英語分割の組成は文字を足す打鍵の前に確定して新しい組成を始める() {
+        for mode in MODES {
+            for (keys, committed, handled) in [
+                ("artifactni.testmo", "artifactに。testも", true),
+                ("artifactni.Test", "artifactに。Test", true),
+                ("artifactni.tugiha", "artifactに。つぎは", true),
+                ("artifactni.<space><esc>testmo", "artifactに。testも", true),
+                ("artifactni.1", "artifactに。1", false),
+                ("artifactni.(", "artifactに。（", true),
+                ("artifactni.-", "artifactに。ー", true),
+                ("artifactni..", "artifactに。。", true),
+            ] {
+                assert_eq!(committed_by_enter(mode, keys), after_enter(committed, handled), "{mode:?} {keys}");
+            }
+        }
+    }
+
+    #[test]
+    fn 句読点を消せば英語分割の組成の続きを打てる() {
+        for mode in MODES {
+            assert_eq!(committed_by_enter(mode, "artifactni.<bs>ka"), after_enter("artifactにか", true), "{mode:?}");
+            assert_eq!(committed_by_enter(mode, "artifactni.<bs>"), after_enter("artifactに", true), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn 句読点のあとの打鍵で確定した英単語もenterと同じく英語として覚える() {
+        let lexicon = FakeLexicon::default();
+        let memory = lexicon.memory();
+        let mut s = Session::new(Composer::new(NullEngine, lexicon), memory.clone(), ConversionMode::Space);
+        drive(&mut s, "artifactni.t");
+        assert_eq!(memory.learned(), ["artifact"]);
+    }
+
+    #[test]
+    fn 英単語の語尾にasciiのかなが残る組成の句読点はasciiで確定する() {
+        for mode in MODES {
+            assert_eq!(committed_by_enter(mode, "artifactwok."), after_enter("artifactをk.", false), "{mode:?}");
+        }
     }
 
     #[test]
