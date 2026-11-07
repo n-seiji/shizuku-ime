@@ -75,7 +75,7 @@ enum DigitStyle {
     Kanji,
 }
 
-fn is_kana(c: char) -> bool {
+pub(super) fn is_kana(c: char) -> bool {
     matches!(c as u32, 0x3041..=0x3096 | 0x30A1..=0x30FA | 0x30FC)
 }
 
