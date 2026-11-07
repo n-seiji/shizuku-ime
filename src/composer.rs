@@ -226,6 +226,10 @@ enum Segment {
 }
 
 impl Segment {
+    fn has_ascii_kana(&self) -> bool {
+        matches!(self, Segment::Kana { kana, .. } if kana.chars().any(|c| c.is_ascii_alphabetic()))
+    }
+
     fn keys(&self) -> &str {
         match self {
             Segment::Kana { keys, .. } => keys,
@@ -258,6 +262,7 @@ impl Segment {
     }
 }
 
+const PUNCT_KANA: [&str; 6] = ["。", "、", "！", "？", "「", "」"];
 /// 1 回の変換で入れる絵文字の上限
 const EMOJI_LIMIT: usize = 5;
 /// 絵文字より前に並べるエンジン候補の数
@@ -602,7 +607,12 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
 
     fn convert_reading(&mut self) -> Vec<Candidate> {
         let rest = self.rest().to_string();
-        self.convert_mixed("", &rest)
+        let head = match self.segments.first() {
+            Some(Segment::Literal(head)) => head.clone(),
+            _ => String::new(),
+        };
+        let tail = rest.strip_prefix(head.as_str()).unwrap_or(&rest).to_string();
+        self.convert_mixed(&head, &tail)
     }
 
     /// 読みの `->` を `>` としてエンジンに渡して変換し、返った候補の同じ位置の `>` を `->` に戻す。
@@ -929,6 +939,15 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
             && self.engine.has_reading_prefix(&format!("{}ー", self.hiragana))
     }
 
+    pub fn punct_continues_kana(&self) -> bool {
+        self.phase() == Phase::Mixed
+            && matches!(self.segments.last(), Some(last @ Segment::Kana { .. }) if !last.has_ascii_kana())
+    }
+
+    pub fn closed_by_punct_after_english_head(&self) -> bool {
+        matches!(self.segments.as_slice(), [Segment::Literal(_), .., Segment::Kana { kana, .. }] if PUNCT_KANA.contains(&kana.as_str()))
+    }
+
     /// 組成全体 (raw) の判定が `verdict` か。
     fn is_verdict(&self, raw: &str, verdict: Verdict) -> bool {
         matches!(&self.word_verdict, Some((r, v)) if r == raw && *v == verdict)
@@ -973,10 +992,7 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
 
     /// 変換できずに ASCII のまま残った文字が組成に含まれるか(英単語の合図)。英字の区切りは数えない。
     fn has_ascii_kana(&self) -> bool {
-        self.segments.iter().any(|s| match s {
-            Segment::Kana { kana, .. } => kana.chars().any(|c| c.is_ascii_alphabetic()),
-            Segment::Literal(_) => false,
-        })
+        self.segments.iter().any(Segment::has_ascii_kana)
     }
 
     /// 小文字 1 文字ぶんの打鍵をローマ字として受ける。
@@ -1000,6 +1016,7 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
     /// 数字・記号をそのままの打鍵として追加する (既定の和文表記があればそれをかなとして使う)。
     pub fn type_text(&mut self, text: &str) {
         debug_assert!(self.romaji.buffer().is_empty(), "romaji is flushed before text keys");
+        self.split_origin = None;
         let kana = symbols::default_form(text).unwrap_or(text);
         if kana.is_empty() {
             return;

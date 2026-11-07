@@ -32,6 +32,59 @@ artifactwotsukau<space><enter>	artifactを使う
 <live>artifactni<enter>	artifactに
 <live>artifactwok<enter>	artifactをk
 <live>artifactwokousinsite<bs><bs><enter>	artifactを更新
+# 英単語 + 日本語の組成の句読点は、日本語だけの組成と同じく和文になり、組成に残って Enter で確定する。
+<live>buildgatooranai.<enter>	buildが通らない。
+buildgatooranai.<enter>	buildがとおらない。
+<live>testwokousinsite.<enter>	testを更新して。
+artifactni.<enter>	artifactに。
+artifactwotukau.<enter>	artifactをつかう。
+<live>artifactni.<enter>	artifactに。
+artifactni,<enter>	artifactに、
+artifactni!<enter>	artifactに！
+artifactni?<enter>	artifactに？
+artifactni[<enter>	artifactに「
+artifactni]<enter>	artifactに」
+<live>buildgatooranai!<enter>	buildが通らない！
+<live>buildgatooranai?<enter>	buildが通らない？
+buildgatooranai.<space><enter>	buildが通らない。
+buildgatooranai.<space><esc><enter>	buildがとおらない。
+artifactni.<space><bs><enter>	artifactに。
+<live>artifactni.<bs><enter>	artifactに
+artifactni.<bs><enter>	artifactに
+<live>buildgatooranai.<bs><enter>	buildが通らない
+artifactni.<bs>ka<enter>	artifactにか
+artifactni.<esc>a<enter>	あ
+# 句読点で終わる英単語 + 日本語の組成は、文字を足す次の打鍵の前に確定し、その打鍵は組成が空のときと同じに扱う (live でも Space でも)。日本語だけの組成は句読点のあとも続く。
+<live>buildgatooranai.testmotuikasite<enter>	buildが通らない。testも追加して
+buildgatooranai.testmotuikasite<space><enter>	buildがとおらない。testも追加して
+buildgatooranai.testmo<enter>	buildがとおらない。testも
+githubni.testmo<enter>	githubに。testも
+<live>githubni.testmo<enter>	githubに。testも
+<live>artifactwokousinnsite,testmotuikasite<enter>	artifactを更新して、testも追加して
+<live>buildgatooranai.Test<enter>	buildが通らない。Test
+<live>buildgatooranai.1testmo<enter>	buildが通らない。1testも
+<live>buildgatooranai.1<enter>	buildが通らない。1\n
+<live>buildgatooranai.-<enter>	buildが通らない。ー
+buildgatooranai.(<enter>	buildがとおらない。（
+buildgatooranai.<space><esc>testmo<enter>	buildがとおらない。testも
+<live>buildgatooranai.<space><esc>testmo<enter>	buildがとおらない。testも
+artifactni.tugiha<enter>	artifactに。つぎは
+artifactni,tugiha<enter>	artifactに、つぎは
+artifactni!tugiha<enter>	artifactに！つぎは
+artifactni?tugiha<enter>	artifactに？つぎは
+artifactni[tugiha<enter>	artifactに「つぎは
+artifactni]tugiha<enter>	artifactに」つぎは
+artifactni.tugiha<space><enter>	artifactに。次は
+<live>artifactwokousinnsite,tugiha<enter>	artifactを更新して、次は
+<live>buildgatooranai.tugiha<enter>	buildが通らない。次は
+<live>kyouhaiitenkidane.asitahaame<enter>	今日はいい天気だね。明日は雨
+kyouha.asitaha<space><enter>	今日は。明日は
+# ASCII の子音で終わる組成 (artifactwok)、英単語だけの組成 (enter)、英字の区切りで終わる組成 (kyouTokyo) の句読点は ASCII のまま確定する。
+<live>artifactwok.<enter>	artifactをk.\n
+artifactwok.<enter>	artifactをk.\n
+<live>enter,<enter>	enter,\n
+<live>kyouTokyo.<enter>	きょうTokyo.\n
+kyouhaMerge.<enter>	きょうはMerge.\n
 include<enter>	include
 git<space>merge<enter>	git merge
 enter<space>	enter 
@@ -536,6 +589,9 @@ issue<space>	issue
 <live>issuenisitai<enter>	issueにしたい
 <live>kitto<enter>	きっと
 <live>made<enter>	まで
+# 打ちかけの子音は英単語の印にしない。ん や っ のあとに助詞が続く日本語 (さいきんは, きっと) を英単語 + 助詞に分けない。
+saikinnhaz<enter>	さいきんはz
+kittok<enter>	きっとk
 # live の Backspace で、見えている日本語が英単語 (kimono) の綴りに縮んでも、読みが見出しなら固定した表示を保つ。
 <live>kimonowo<bs><enter>	着物
 <live>animega<bs><enter>	アニメ
