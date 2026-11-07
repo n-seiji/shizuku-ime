@@ -514,6 +514,27 @@ sonokenn<bs><enter>	そのけ
 <live>senseiha<bs>kou<enter>	先生項
 <live>sensei<bs><space><enter>	戦
 <live>sensei<bs>Apple<enter>	せんApple
+# live 変換で、かなのあとに大文字から始まる英字が続いても、かな部分の変換を保つ (Enter が確定するのは見えているとおり)。かな部分が 2 かな以下ならひらがなのまま。
+# 漢字はエンジン順 (judge なし) のもの。英字の後ろの小文字は英字のまま。
+<live>raisyuudeOK<enter>	来週でOK
+<live>asitademoOk<enter>	明日でもOk
+<live>kyouTokyo<enter>	強Tokyo
+<live>kyouhaON<enter>	今日はON
+<live>kyouhaPRdesu<enter>	今日はPRdesu
+<live>iPhone<enter>	いPhone
+<live>kyouTokyo<bs><bs><bs><bs><enter>	強T
+<live>kyouTokyo<bs><bs><bs><bs><bs><enter>	強
+<live>raisyuudeOK<space><enter>	来週でOK
+# 固定したあとに大文字から始まる英字が続いても、固定は保ち、見えている固定と残りの後ろに英字を付ける (読み全体を変換し直さない)。Space は固定を外して読み全体を変換し直す (英字は残る)。
+<live>kugiwoutu<bs>A<enter>	釘を打A
+<live>kyouha<bs>OK<enter>	今日OK
+<live>senseiha<bs>kouA<enter>	先生項A
+<live>kugiwoutu<bs>AB<bs><enter>	釘を打A
+<live>kugiwoutu<bs>A<bs><enter>	釘を打
+<live>kugiwoutu<bs>A<space><enter>	釘をうA
+# live から Space に切り替えたあとの、かなに続く英字は Space 変換と同じ候補になる (live の変換を持ち越さない)。
+<live>kyouhaOK<space-mode><space><enter>	きょうはOK
+<live>kyouhaOK<space-mode><space><space><enter>	kyouhaOK
 # 英単語のあとに助詞で始まらないかなが続いても、頭に l q v x を含む語なら英単語とかなに分ける。語が打ちかけの間 (informa) や日本語として自然でない続きは分けない。
 # 漢字はエンジン順 (judge なし) のもの。
 <live>loginjinihiraku<enter>	login耳に開く

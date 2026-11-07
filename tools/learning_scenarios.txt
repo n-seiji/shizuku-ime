@@ -37,3 +37,7 @@ md<enter>	md
 okinasou<space><enter>	起きなそう
 okinasou<space><pick:2>	翁層
 okinasou<space><enter>	翁層
+# live 変換で英字が続く確定も、見えているかな部分の変換を学習する。選んだ 肴 は、英字が続かない打鍵にも効く
+<live>sakanaOK<space><space><space><enter>	肴OK
+<live>sakana<enter>	肴
+<live>sakanaOK<enter>	肴OK
