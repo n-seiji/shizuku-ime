@@ -1,13 +1,5 @@
-# 学習ありのシナリオ: `mise run scenarios-learning`。`SHIZUKU_SIM_LEARNING=1` で学習 on・空の一時メモリで流す。
+# 英語の記憶ありのシナリオ: `mise run scenarios-learning`。`SHIZUKU_SIM_LEARNING=1` で記憶 on・空の一時メモリで流す。
 # 行は上から順に 1 つの記憶へ積み上がるので、並びを変えると結果が変わる。形式は scenarios.txt と同じ。
-# 学習前: 感じ / kanji / 漢字 / 幹事 の順
-kanji<space><enter>	感じ
-kanji<space><space><space><enter>	幹事
-kanji<space><enter>	幹事
-# 別の読みには影響しない
-kankei<space><enter>	関係
-# 覚えた語は長い読みの中でも効く
-kanjiwokaku<space><enter>	幹事を書く
 # 候補から選んで英語として確定した語は、以後 (見出しの読みがあっても) 英字のまま打つ。選ぶ前は読み
 donewo<enter>	どねを
 done<space><pick:2>	done
@@ -18,14 +10,6 @@ the<enter>	the
 madeni<enter>	までに
 donewo<enter>	どねを
 thenoyoni<enter>	てぇのよに
-# 末尾の n を ん として見せている間の変換は、学習に使う変換の世代を食い違わせない。n のあとに確定しても、n を消して確定しても、表示した候補を学習する
-shinbun<space><space><space><enter>	新分
-<live>shinbun<enter>	新分
-shinbun<space><enter>	新分
-shinbun<bs><space><space><space><enter>	しん部
-shinbu<space><enter>	しん部
-<live>shinbu<enter>	しん部
-<live>shinbun<bs><enter>	しん部
 # 数字を含む開発用語の確定も同じ経路 (英語として確定)。覚えた後も、手前の base6 や md は変わらない
 base64<enter>	base64
 base64<enter>	base64
@@ -33,13 +17,5 @@ md5<enter>	md5
 md5<enter>	md5
 base6<enter>	ばせ6
 md<enter>	md
-# 派生した 起きなそう は先頭に出て、覚える。先頭を替えても候補の添字は学習データとずれず、選んだ 翁層 が次から先頭になる
-okinasou<space><enter>	起きなそう
-okinasou<space><pick:2>	翁層
-okinasou<space><enter>	翁層
-# live 変換で英字が続く確定も、見えているかな部分の変換を学習する。選んだ 肴 は、英字が続かない打鍵にも効く
-<live>sakanaOK<space><space><space><enter>	肴OK
-<live>sakana<enter>	肴
-<live>sakanaOK<enter>	肴OK
 # 打ちかけの子音で確定しても、っ までの打鍵 (kit) を英単語として覚えない。覚えると、あとの きっと が kit + と に分かれる
 kittok<enter>kittoiu<enter>	きっとkきっという

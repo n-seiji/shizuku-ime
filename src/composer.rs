@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 // composer.rs - 未確定文の状態機械: 入力単位(ローマ字+かな) + 同期変換候補 + フェーズ。
-// 候補は {text, source} で持ち、リランキング後も学習には Source::Engine の元の順位を渡す。
-// ローマ字そのまま(raw)など engine 以外の候補は順位を持たず、確定しても学習しない。
+// 候補は {text, source} で持ち、リランキング後も Source::Engine の元の順位 (engine の添字) を持ち続ける。
+// ローマ字そのまま(raw)など engine 以外の候補は順位を持たない。
 
 use std::borrow::Cow;
 
@@ -19,7 +19,7 @@ pub struct Candidate {
     pub source: Source,
 }
 
-/// `CandidateEngine::convert` が返した順位。学習に渡す唯一の添字。
+/// `CandidateEngine::convert` が返した順位 (`words` を引く添字)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EngineRank(pub usize);
 
@@ -47,13 +47,10 @@ impl Candidate {
     }
 }
 
-/// 確定の結果。学習は「何を学習すべきか」だけを持ち、実行は Session が行う。
-/// `engine` が None なら Session は engine を取り消す (保留中の学習状態を残さない)。
+/// 確定の結果。英語の記憶は「何を覚えるべきか」だけを持ち、実行は Session が行う。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Committed {
     pub text: String,
-    /// engine に学習させる (確定時の世代, 元の順位)。
-    pub engine: Option<(u64, EngineRank)>,
     /// 英語として確定した語。
     pub english: Vec<String>,
     /// 候補一覧から英字そのもの (done, the) を選んで確定した語。以後その語を英語で打つ合図 (`Composer::picked_english`)。
@@ -63,7 +60,6 @@ pub struct Committed {
 
 pub trait CandidateEngine {
     fn convert(&mut self, revision: u64, hiragana: &str) -> Vec<String>;
-    fn select(&mut self, revision: u64, engine_index: usize) -> bool;
     fn cancel(&mut self);
     /// 変換の文脈 (アプリで直前に確定した文字列。空なら文脈なし) と、そのアプリが英語を打つアプリか。キーごとに、変換する前に渡される。
     fn set_context(&mut self, _context: &str, _english_app: bool) {}
@@ -1190,15 +1186,6 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
         }
     }
 
-    /// live 変換で、underline に出ている (preedit と同じ) 第 1 候補の engine 順位。
-    fn live_rank(&self) -> Option<EngineRank> {
-        let live_mixed = matches!(self.stage, Stage::Editing) && self.typing == Typing::Mixed && self.live;
-        if !self.is_live_kana() && !live_mixed {
-            return None;
-        }
-        self.reading.list.first().and_then(Candidate::engine_rank)
-    }
-
     /// live 変換が表示を変換する長さの読みか。かなだけを数え、未確定のローマ字・記号・数字・長音は数えない。
     fn live_converts(&self, reading: &str) -> bool {
         let kana = reading.chars().filter(|c| matches!(c, '\u{3041}'..='\u{3096}' | '\u{30A1}'..='\u{30FA}')).count();
@@ -1442,7 +1429,7 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
         (memorable && chosen.text == raw && chosen.engine_rank().is_none() && !self.is_verdict(&raw, Verdict::Judged)).then_some(raw)
     }
 
-    /// 確定する。学習は実行せず、何を学習すべきかを返すだけ。実行と可否の判定は Session が行う。
+    /// 確定する。英語の記憶は実行せず、何を覚えるべきかを返すだけ。実行と可否の判定は Session が行う。
     pub fn commit(&mut self) -> Committed {
         let phase = self.phase();
         let text = self.commit_preview();
@@ -1453,18 +1440,11 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
         }
         english.extend(self.segments.iter().filter(|s| s.is_literal()).map(|s| s.keys().to_string()));
         let picked = self.picked_english();
-        // 固定した先頭部分を含む確定は、1 つの候補の順位では表せないので学習しない。
-        let engine = match &self.stage {
-            _ if self.pin.is_some() => None,
-            Stage::Selecting(s) => s.list[s.cursor].engine_rank(),
-            _ => self.live_rank(),
-        }
-        .map(|rank| (self.reading.generation, rank));
         self.clear();
-        Committed { text, engine, english, picked }
+        Committed { text, english, picked }
     }
 
-    /// 学習の実行 (engine.select / cancel) のために Session が使う。
+    /// Session が engine の文脈の設定と取り消しに使う。
     pub fn engine_mut(&mut self) -> &mut E {
         &mut self.engine
     }
@@ -1513,7 +1493,7 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
     }
 
     /// `text` が `position` より前に既にあれば true (呼び出し側は足さない)。`position` 以降にエンジン候補として居るなら、その複製を消して
-    /// false を返す (呼び出し側が決まった位置に入れる)。消す候補は後ろの重複なので、他の候補の `EngineRank` (学習の添字) は変わらない。
+    /// false を返す (呼び出し側が決まった位置に入れる)。消す候補は後ろの重複なので、他の候補の `EngineRank` (engine の添字) は変わらない。
     fn claim_slot(list: &mut Vec<Candidate>, text: &str, position: usize) -> bool {
         if list.iter().take(position).any(|c| c.text == text) {
             return true;

@@ -46,7 +46,7 @@ run = "cargo run --release -- --check-main-queue"
 
 [tasks.scenarios-learning]
 env = { SHIZUKU_DICTIONARY = "{{config_root}}/dictionary" }
-description = "学習ありのシナリオを流す (記憶は一時ディレクトリ)"
+description = "英語の記憶ありのシナリオを流す (記憶は一時ディレクトリ)"
 run = "SHIZUKU_SIM_LEARNING=1 cargo run --release -- --simulate-file tools/learning_scenarios.txt"
 
 

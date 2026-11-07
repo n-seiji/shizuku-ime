@@ -216,17 +216,11 @@ impl<E: CandidateEngine, L: Lexicon, M: EnglishMemory> Session<E, L, M> {
         fx
     }
 
-    /// 確定して、学習してよければ学習する。学習の可否を判定するのはここだけ。
-    /// 学習しない (ゲートが閉じている / 学習対象の engine 候補が無い) ときは engine の保留を取り消す。
+    /// 確定して、学習してよければ英語の語を覚える。学習の可否を判定するのはここだけ。engine の保留は常に取り消す。
     /// chosen は、利用者が確定を選んだ (commitComposition ではない) とき true。候補から選んだ英字はそのときだけ学習する。
     fn commit(&mut self, gates: &Gates, chosen: bool) -> String {
-        let Committed { text, engine, english, picked } = self.composer.commit();
-        match engine.filter(|_| gates.learning) {
-            Some((generation, rank)) => {
-                let _ = self.composer.engine_mut().select(generation, rank.0);
-            }
-            None => self.composer.engine_mut().cancel(),
-        }
+        let Committed { text, english, picked } = self.composer.commit();
+        self.composer.engine_mut().cancel();
         if gates.learning {
             for word in english.iter().chain(picked.iter().filter(|_| chosen)) {
                 self.memory.learn(word);
@@ -393,9 +387,6 @@ mod tests {
     impl CandidateEngine for NullEngine {
         fn convert(&mut self, _: u64, _: &str) -> Vec<String> {
             Vec::new()
-        }
-        fn select(&mut self, _: u64, _: usize) -> bool {
-            false
         }
         fn cancel(&mut self) {}
     }
@@ -630,9 +621,6 @@ mod tests {
     impl CandidateEngine for TwoEngine {
         fn convert(&mut self, _: u64, hiragana: &str) -> Vec<String> {
             vec![hiragana.to_string(), "x".to_string()]
-        }
-        fn select(&mut self, _: u64, _: usize) -> bool {
-            false
         }
         fn cancel(&mut self) {}
     }
@@ -880,16 +868,11 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct RecordingEngine {
-        selects: std::rc::Rc<std::cell::RefCell<Vec<(u64, usize)>>>,
         cancels: std::rc::Rc<std::cell::Cell<usize>>,
     }
     impl CandidateEngine for RecordingEngine {
         fn convert(&mut self, _: u64, hiragana: &str) -> Vec<String> {
             vec![hiragana.to_string(), "x".to_string()]
-        }
-        fn select(&mut self, revision: u64, index: usize) -> bool {
-            self.selects.borrow_mut().push((revision, index));
-            true
         }
         fn cancel(&mut self) {
             self.cancels.set(self.cancels.get() + 1);
@@ -910,25 +893,22 @@ mod tests {
     }
 
     #[test]
-    fn 学習が許されれば確定した候補をengineに学習させる() {
+    fn 学習が許されても確定でengineの保留を取り消す() {
         let (engine, _) = commit_with(&ALLOW, "kyou ");
-        assert_eq!(engine.selects.borrow().len(), 1);
-        assert_eq!(engine.cancels.get(), 0);
+        assert_eq!(engine.cancels.get(), 1);
     }
 
     #[test]
-    fn 学習が許されなければengineの保留を取り消して学習しない() {
+    fn 学習が許されなければ英語の語を覚えない() {
         let denied = Gates { learning: false, direct: false };
         let (engine, memory) = commit_with(&denied, "kyou ");
-        assert!(engine.selects.borrow().is_empty());
         assert_eq!(engine.cancels.get(), 1);
         assert!(memory.learned().is_empty());
     }
 
     #[test]
-    fn engine候補でない確定ではengineを取り消す() {
+    fn raw候補の確定でもengineを取り消す() {
         let (engine, _) = commit_with(&ALLOW, "kyou   ");
-        assert!(engine.selects.borrow().is_empty(), "raw 候補は学習しない");
         assert_eq!(engine.cancels.get(), 1);
     }
 
@@ -944,9 +924,6 @@ mod tests {
     impl CandidateEngine for HeadwordEngine {
         fn convert(&mut self, revision: u64, hiragana: &str) -> Vec<String> {
             self.0.convert(revision, hiragana)
-        }
-        fn select(&mut self, revision: u64, index: usize) -> bool {
-            self.0.select(revision, index)
         }
         fn cancel(&mut self) {
             self.0.cancel();
@@ -1162,9 +1139,6 @@ mod tests {
         fn convert(&mut self, _: u64, hiragana: &str) -> Vec<String> {
             vec![format!("【{hiragana}】")]
         }
-        fn select(&mut self, _: u64, _: usize) -> bool {
-            false
-        }
         fn cancel(&mut self) {}
     }
 
@@ -1192,61 +1166,6 @@ mod tests {
         ] {
             assert_eq!(live_shown_and_committed(keys), (shown.to_string(), shown.to_string()), "{keys}");
         }
-    }
-
-    /// 直近の変換だけを覚える engine。select は世代が直近の変換と合うときだけ成功し、学習した (読み, 表記) を残す。
-    #[derive(Clone, Default)]
-    struct StrictEngine {
-        last: Option<(u64, String, Vec<String>)>,
-        learned: std::rc::Rc<std::cell::RefCell<Vec<(String, String)>>>,
-        rejected: std::rc::Rc<std::cell::Cell<usize>>,
-    }
-    impl CandidateEngine for StrictEngine {
-        fn convert(&mut self, revision: u64, hiragana: &str) -> Vec<String> {
-            let texts = vec![format!("{hiragana}A"), format!("{hiragana}B")];
-            self.last = Some((revision, hiragana.to_string(), texts.clone()));
-            texts
-        }
-        fn select(&mut self, revision: u64, index: usize) -> bool {
-            match self.last.take() {
-                Some((r, reading, texts)) if r == revision && index < texts.len() => {
-                    self.learned.borrow_mut().push((reading, texts[index].clone()));
-                    true
-                }
-                _ => {
-                    self.rejected.set(self.rejected.get() + 1);
-                    false
-                }
-            }
-        }
-        fn cancel(&mut self) {
-            self.last = None;
-        }
-    }
-
-    /// keys を打って確定したときに engine が学習した (読み, 表記) と、選べなかった回数。
-    fn learned_after(mode: ConversionMode, keys: &str) -> (Vec<(String, String)>, usize, String) {
-        let engine = StrictEngine::default();
-        let (learned, rejected) = (engine.learned.clone(), engine.rejected.clone());
-        let mut session = Session::new(Composer::new(engine, FakeLexicon::default()), FakeMemory::default(), mode);
-        let mut committed = String::new();
-        for ch in keys.chars() {
-            committed.extend(inserted(&session.handle(&ALLOW, classify(ch), &ch.to_string())));
-        }
-        let learned = learned.borrow().clone();
-        (learned, rejected.get(), committed)
-    }
-
-    #[test]
-    fn n_のあとに確定した変換は表示した候補の順位を学習する() {
-        let want = |reading: &str, text: &str| (vec![(reading.to_string(), text.to_string())], 0, text.to_string());
-        // live は第 1 候補。Space は 1 回目で変換に入り 2 回目で次の候補へ進む。
-        assert_eq!(learned_after(ConversionMode::Live, "shinbun\r"), want("しんぶん", "しんぶんA"));
-        assert_eq!(learned_after(ConversionMode::Live, "shinbun\u{8}\r"), want("しんぶ", "しんぶA"));
-        assert_eq!(learned_after(ConversionMode::Live, "shinbuna\r"), want("しんぶな", "しんぶなA"));
-        assert_eq!(learned_after(ConversionMode::Space, "shinbun  \r"), want("しんぶん", "しんぶんB"));
-        assert_eq!(learned_after(ConversionMode::Space, "shinbun\u{8}  \r"), want("しんぶ", "しんぶB"));
-        assert_eq!(learned_after(ConversionMode::Space, "shinbuna  \r"), want("しんぶな", "しんぶなB"));
     }
 
     #[test]
