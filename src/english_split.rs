@@ -125,7 +125,7 @@ pub fn split(
     if raw.len() < 3 || !raw.bytes().all(|b| b.is_ascii_lowercase()) {
         return None;
     }
-    let (whole, _) = convert(raw, true);
+    let (whole, _) = convert(raw, finished);
     let foreign = has_ascii(&whole);
     let split_at = |i: usize| {
         let (head, rest) = raw.split_at(i);
@@ -162,14 +162,10 @@ pub fn split(
         Some(Split { head: head.to_string(), tail, pending })
     };
     let relaxed = || {
-        if !raw.contains(FOREIGN_LETTERS) || is_word_prefix(raw) || knows(raw) {
+        if foreign || !raw.contains(FOREIGN_LETTERS) || is_word_prefix(raw) || knows(raw) {
             return None;
         }
-        let (units, _) = convert(raw, finished);
-        if has_ascii(&units) {
-            return None;
-        }
-        let boundaries: Vec<usize> = units
+        let boundaries: Vec<usize> = whole
             .iter()
             .scan(0, |end, (typed, _)| {
                 *end += typed.len();
@@ -238,6 +234,13 @@ mod tests {
         assert_eq!(shown("kitto"), None);
         assert_eq!(shown("kantanni"), None);
         assert_eq!(shown("kyouhaishaniiku"), None);
+    }
+
+    #[test]
+    fn 打ちかけの子音があっても日本語は分けない() {
+        assert_eq!(shown("saikinnhaz"), None);
+        assert_eq!(shown("sakihodohanasitakenndesug"), None);
+        assert_eq!(shown("kittok"), None);
     }
 
     #[test]
