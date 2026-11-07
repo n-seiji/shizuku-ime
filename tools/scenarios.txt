@@ -536,6 +536,9 @@ issue<space>	issue
 <live>issuenisitai<enter>	issueにしたい
 <live>kitto<enter>	きっと
 <live>made<enter>	まで
+# 打ちかけの子音は英単語の印にしない。ん や っ のあとに助詞が続く日本語 (さいきんは, きっと) を英単語 + 助詞に分けない。
+saikinnhaz<enter>	さいきんはz
+kittok<enter>	きっとk
 # live の Backspace で、見えている日本語が英単語 (kimono) の綴りに縮んでも、読みが見出しなら固定した表示を保つ。
 <live>kimonowo<bs><enter>	着物
 <live>animega<bs><enter>	アニメ

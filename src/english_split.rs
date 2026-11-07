@@ -241,6 +241,13 @@ mod tests {
     }
 
     #[test]
+    fn 打ちかけの子音があっても日本語は分けない() {
+        assert_eq!(shown("saikinnhaz"), None);
+        assert_eq!(shown("sakihodohanasitakenndesug"), None);
+        assert_eq!(shown("kittok"), None);
+    }
+
+    #[test]
     fn 英語として確定したことのある語は母音で終わっても詰まりがなくても分ける() {
         assert_eq!(split("mergeni", false, |w| w == "merge", |_| false, |_| false, |_| false).map(|s| s.display()).as_deref(), Some("mergeに"));
         assert_eq!(split("openni", false, |w| w == "open", |_| false, |_| false, |_| false).map(|s| s.display()).as_deref(), Some("openに"));
