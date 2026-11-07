@@ -118,6 +118,12 @@ pub enum Phase {
     Transliterated(Form),
 }
 
+/// かなの区切りのあとに英字の区切りだけが続く組成の、かな部分の読みと英字。
+struct KanaThenLiteral {
+    kana: String,
+    literal: String,
+}
+
 /// 入力中の打鍵の解釈。Empty は未確定文が無い状態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Typing {
@@ -319,6 +325,7 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
             self.live = live;
             self.unpin();
             self.sync_live_split();
+            self.resync_live_mixed();
         }
     }
 
@@ -370,16 +377,14 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
     pub fn display(&self) -> Cow<'_, str> {
         match &self.stage {
             Stage::Selecting(s) => Cow::Borrowed(&s.list[s.cursor].text),
-            Stage::Editing if self.typing == Typing::Kana && self.live_converts() => match &self.pin {
-                None => Cow::Borrowed(self.reading.list.first().map_or(self.hiragana.as_str(), |c| c.text.as_str())),
-                Some(pin) => {
-                    let converted = self.converted_first();
-                    Cow::Owned(pin.surface() + converted.map_or(self.rest(), |c| c.text.as_str()))
-                }
-            },
-            Stage::Editing if self.typing == Typing::Mixed && self.live => {
+            Stage::Editing
+                if (self.typing == Typing::Kana && self.live_converts(&self.hiragana)) || (self.typing == Typing::Mixed && self.live) =>
+            {
                 let converted = self.converted_first();
-                Cow::Borrowed(converted.map_or(self.hiragana.as_str(), |c| c.text.as_str()))
+                match &self.pin {
+                    None => Cow::Borrowed(converted.map_or(self.hiragana.as_str(), |c| c.text.as_str())),
+                    Some(pin) => Cow::Owned(pin.surface() + converted.map_or(self.rest(), |c| c.text.as_str())),
+                }
             }
             Stage::Transliterated { text, .. } => Cow::Borrowed(text),
             _ => Cow::Borrowed(&self.hiragana),
@@ -540,7 +545,7 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
                 .collect();
             return;
         }
-        if !self.live_converts() || !self.pin_matches_reading() {
+        if !self.live_converts(&self.hiragana) || !self.pin_matches_reading() {
             self.pin = None;
         }
         self.sync_live_split();
@@ -597,6 +602,8 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
         if matches!(self.stage, Stage::Editing) && self.typing == Typing::Kana {
             self.reading.list = self.convert_reading();
             self.enter_english_if_word();
+        } else {
+            self.resync_live_mixed();
         }
     }
 
@@ -1072,11 +1079,13 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
         self.absorb_flush(english, keys, flush);
     }
 
-    /// 英単語としてそのまま追加する。かな変換も候補生成もしない。
     pub fn push_literal(&mut self, text: &str) {
-        self.pin = None;
-        if !self.candidates().is_empty() {
-            self.engine.cancel();
+        let converted = self.live_mixed_kept();
+        if converted.is_none() {
+            self.pin = None;
+            if !self.candidates().is_empty() {
+                self.engine.cancel();
+            }
         }
         self.split_origin = None;
         let split = if self.typing == Typing::English { self.english_split(false) } else { None };
@@ -1097,7 +1106,7 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
             self.segments.push(Segment::Literal(text.to_string()));
         }
         self.sync_hiragana();
-        self.reset_candidates();
+        self.sync_live_mixed(converted);
         self.stage = Stage::Editing;
         self.typing = self.literal_typing();
     }
@@ -1111,6 +1120,59 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
         }
     }
 
+    fn kana_then_literal(&self) -> Option<KanaThenLiteral> {
+        let (kana, literal) = self.segments.split_at(self.segments.iter().position(Segment::is_literal)?);
+        if kana.is_empty() || !literal.iter().all(Segment::is_literal) || self.has_ascii_kana() {
+            return None;
+        }
+        Some(KanaThenLiteral { kana: kana.iter().map(Segment::reading).collect(), literal: literal.iter().map(Segment::keys).collect() })
+    }
+
+    fn live_mixed_parts(&self) -> Option<KanaThenLiteral> {
+        self.kana_then_literal().filter(|parts| self.live_converts(&parts.kana))
+    }
+
+    fn live_mixed_kept(&self) -> Option<KanaThenLiteral> {
+        if !matches!(self.stage, Stage::Editing) || (self.pin.is_none() && self.reading.list.is_empty()) {
+            return None;
+        }
+        match self.typing {
+            Typing::Mixed => self.live_mixed_parts(),
+            _ if self.is_live_kana() => Some(KanaThenLiteral { kana: self.hiragana.clone(), literal: String::new() }),
+            _ => None,
+        }
+    }
+
+    fn sync_live_mixed(&mut self, converted: Option<KanaThenLiteral>) {
+        let Some(KanaThenLiteral { kana, literal }) = self.live_mixed_parts() else {
+            self.pin = None;
+            self.reset_candidates();
+            return;
+        };
+        let reused = converted.filter(|old| old.kana == kana).and_then(|old| {
+            self.reading
+                .list
+                .iter()
+                .map(|c| Some(Candidate { text: format!("{}{literal}", c.text.strip_suffix(old.literal.as_str())?), source: c.source }))
+                .collect::<Option<Vec<_>>>()
+        });
+        if let Some(list) = reused {
+            self.reading.list = list;
+            return;
+        }
+        self.pin = None;
+        self.reset_candidates();
+        let heads = self.convert_mixed("", &kana);
+        self.reading.list = heads.into_iter().map(|c| Candidate { text: c.text + &literal, source: c.source }).collect();
+    }
+
+    fn resync_live_mixed(&mut self) {
+        if matches!(self.stage, Stage::Editing) && self.typing == Typing::Mixed && self.kana_then_literal().is_some() {
+            let converted = self.live_mixed_kept();
+            self.sync_live_mixed(converted);
+        }
+    }
+
     /// live 変換で、underline に出ている (preedit と同じ) 第 1 候補の engine 順位。
     fn live_rank(&self) -> Option<EngineRank> {
         let live_mixed = matches!(self.stage, Stage::Editing) && self.typing == Typing::Mixed && self.live;
@@ -1121,8 +1183,8 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
     }
 
     /// live 変換が表示を変換する長さの読みか。かなだけを数え、未確定のローマ字・記号・数字・長音は数えない。
-    fn live_converts(&self) -> bool {
-        let kana = self.hiragana.chars().filter(|c| matches!(c, '\u{3041}'..='\u{3096}' | '\u{30A1}'..='\u{30FA}')).count();
+    fn live_converts(&self, reading: &str) -> bool {
+        let kana = reading.chars().filter(|c| matches!(c, '\u{3041}'..='\u{3096}' | '\u{30A1}'..='\u{30FA}')).count();
         self.live && kana > LIVE_MIN_KANA
     }
 
@@ -1130,7 +1192,7 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
     fn is_live_kana(&self) -> bool {
         matches!(self.stage, Stage::Editing)
             && self.typing == Typing::Kana
-            && self.live_converts()
+            && self.live_converts(&self.hiragana)
             && self.shown_split().is_none()
             && !self.is_typing_english()
     }
@@ -1190,6 +1252,8 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
             return false;
         }
         self.split_origin = None;
+        let was_literal = matches!(self.typing, Typing::Literal | Typing::Mixed);
+        let converted = if was_literal { self.live_mixed_kept() } else { None };
         // live 変換中は、見えている最後の 1 文字に当たる読みを消し、残りは見えているまま固定する。分からなければ 1 文字。
         let dropped = self.live_drop();
         let rest_was_empty = self.rest().is_empty();
@@ -1202,12 +1266,10 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
             None if rest_was_empty => self.pin = None,
             None => {}
         }
-        let was_literal = matches!(self.typing, Typing::Literal | Typing::Mixed);
         // 英単語の部分を消しきったら、残ったかなは通常の組成に戻す。
         if was_literal && self.segments.iter().any(Segment::is_literal) {
-            self.pin = None;
             self.sync_hiragana();
-            self.reset_candidates();
+            self.sync_live_mixed(converted);
             self.typing = self.literal_typing();
         } else {
             self.refresh();

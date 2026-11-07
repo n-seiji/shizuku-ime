@@ -603,15 +603,88 @@ fn 固定中の字種変換は読み全体を変換し固定を外す() {
     assert_eq!(c.commit_preview(), "センセイ");
 }
 
+fn pinned_kugi() -> WordsComposer {
+    let mut c = words_composer();
+    type_units(&mut c, &[("ku", "く"), ("gi", "ぎ"), ("wo", "を"), ("u", "う"), ("tu", "つ")]);
+    assert!(c.backspace());
+    assert_eq!(c.display(), "釘を打");
+    c
+}
+
 #[test]
-fn 固定中に大文字を打つと固定が外れてかな混じりになる() {
-    let mut c = pinned_sensei();
+fn 固定中に大文字を打つと固定を保ったまま後ろに付くかな混じりになる() {
+    let mut c = pinned_kugi();
+    c.engine.converted.borrow_mut().clear();
     c.push_literal("A");
-    assert!(c.pin.is_none());
+    assert!(c.pin.is_some());
     assert_eq!(c.phase(), Phase::Mixed);
-    assert_eq!(c.hiragana, "せんせいA");
-    assert_eq!(c.preedit(), "せんせいA");
+    assert_eq!(c.hiragana, "くぎをうA");
+    assert_eq!(c.preedit(), "釘を打A");
+    assert!(c.engine.converted.borrow().is_empty(), "固定した読みを変換し直さない");
     assert_wysiwyg(&c);
+}
+
+#[test]
+fn 固定の後ろに残りがあるときの大文字は_固定と残りの表示の後ろに付く() {
+    let mut c = pinned_sensei();
+    type_kou(&mut c);
+    c.engine.converted.borrow_mut().clear();
+    c.push_literal("A");
+    assert_eq!(c.preedit(), "先生後A");
+    assert!(c.engine.converted.borrow().is_empty());
+    c.push_literal("B");
+    assert_eq!(c.preedit(), "先生後AB");
+    assert!(c.backspace());
+    assert_eq!(c.preedit(), "先生後A");
+    assert!(c.engine.converted.borrow().is_empty());
+    assert_wysiwyg(&c);
+}
+
+#[test]
+fn 固定中の大文字を含む確定は表示のまま学習しない() {
+    let mut c = pinned_kugi();
+    c.push_literal("A");
+    let committed = c.commit();
+    assert_eq!(committed.text, "釘を打A");
+    assert_eq!(committed.engine, None);
+}
+
+#[test]
+fn 固定中に打った大文字を消しきると固定した表示に戻る() {
+    let mut c = pinned_kugi();
+    c.push_literal("A");
+    c.push_literal("B");
+    assert!(c.backspace());
+    assert_eq!(c.preedit(), "釘を打A");
+    assert!(c.pin.is_some());
+    assert_wysiwyg(&c);
+    assert!(c.backspace());
+    assert_eq!(c.phase(), Phase::Composing);
+    assert!(c.pin.is_some());
+    assert_eq!(c.preedit(), "釘を打");
+    assert_wysiwyg(&c);
+}
+
+#[test]
+fn 固定中の大文字のあとのスペースは固定を外して読み全体を変換し直す() {
+    let mut c = pinned_kugi();
+    c.push_literal("A");
+    assert!(c.begin_conversion());
+    assert!(c.pin.is_none());
+    assert_eq!(c.display(), "変くぎをうA");
+    assert_eq!(c.candidates().first().map(|x| x.text.as_str()), Some("変くぎをうA"));
+}
+
+#[test]
+fn 固定中の大文字のあとにliveを切ると固定が外れてスペースモードの候補になる() {
+    let mut c = pinned_kugi();
+    c.push_literal("A");
+    c.set_live(false);
+    assert!(c.pin.is_none());
+    assert_eq!(c.preedit(), "くぎをうA");
+    assert_wysiwyg(&c);
+    assert!(c.begin_conversion());
+    assert_eq!(c.candidates().iter().map(|x| x.text.as_str()).collect::<Vec<_>>(), ["くぎをうA", "kugiwouA"]);
 }
 
 #[test]
@@ -1327,6 +1400,131 @@ fn live中の英語分割に付いた末尾の子音は_見えている分割の
     assert_eq!(shown, "artifactをk");
     c.flush_romaji_for_commit();
     assert_eq!(commit_learning(&mut c), shown);
+}
+
+fn live_kyou_composer() -> (Composer<MockEngine, FakeLexicon>, Log) {
+    let (mut c, log) = composer();
+    c.set_live(true);
+    type_kyou(&mut c);
+    (c, log)
+}
+
+#[test]
+fn live中のかなに続く英字は_かな部分を変換した表示と確定になる() {
+    let (mut c, _) = live_kyou_composer();
+    assert_eq!(c.preedit(), "今日");
+    c.push_literal("T");
+    assert_eq!(c.phase(), Phase::Mixed);
+    assert_eq!(c.preedit(), "今日T");
+    c.push_literal("okyo");
+    assert_eq!(c.preedit(), "今日Tokyo");
+    assert_eq!(c.commit_preview(), "今日Tokyo");
+    assert_eq!(c.raw(), "kyouTokyo");
+}
+
+#[test]
+fn live中のかなに続く英字を足し引きしても_かなの変換は変換し直さない() {
+    let (mut c, log) = live_kyou_composer();
+    let converts = log.converts.borrow().len();
+    c.push_literal("T");
+    c.push_literal("o");
+    assert!(c.backspace());
+    assert_eq!(c.preedit(), "今日T");
+    assert_eq!(log.converts.borrow().len(), converts);
+    assert_eq!(*c.engine_cancels(), 0);
+}
+
+#[test]
+fn live中のかなに続く英字のenterは_かな部分の変換を学習する() {
+    let (mut c, log) = live_kyou_composer();
+    c.push_literal("OK");
+    let (revision, _) = log.converts.borrow().last().cloned().expect("converted");
+    assert_eq!(commit_learning(&mut c), "今日OK");
+    assert_eq!(*log.selects.borrow(), vec![(revision, 0)]);
+}
+
+#[test]
+fn live中のかなが2かな以下なら_英字が続いてもひらがなのまま学習しない() {
+    let (mut c, log) = composer();
+    c.set_live(true);
+    c.push_input("i", "い", "");
+    c.push_literal("Phone");
+    assert_eq!(c.preedit(), "いPhone");
+    assert_eq!(c.commit_preview(), "いPhone");
+    assert_eq!(commit_learning(&mut c), "いPhone");
+    assert!(log.selects.borrow().is_empty());
+}
+
+#[test]
+fn live中のかなに続く英字をbackspaceで消しきると_通常のlive変換に戻る() {
+    let (mut c, _) = live_kyou_composer();
+    c.push_literal("To");
+    assert!(c.backspace());
+    assert_eq!(c.preedit(), "今日T");
+    assert!(c.backspace());
+    assert_eq!(c.phase(), Phase::Composing);
+    assert_eq!(c.preedit(), "今日");
+    assert_eq!(c.commit_preview(), "今日");
+}
+
+#[test]
+fn live中のかなに続く英字は_スペースの候補にも付く() {
+    let (mut c, _) = live_kyou_composer();
+    c.push_literal("T");
+    assert!(c.begin_conversion());
+    assert_eq!(texts(&c), vec!["今日T", "京T", "教T", "きょうT", "kyouT"]);
+}
+
+#[test]
+fn live中のかなに続く英字からスペースモードへ切り替えると_スペースモードと同じ候補になる() {
+    let (mut c, _) = live_kyou_composer();
+    c.push_literal("OK");
+    assert_eq!(c.preedit(), "今日OK");
+    c.set_live(false);
+    assert_eq!(c.preedit(), "きょうOK");
+    assert!(c.begin_conversion());
+    let switched = texts(&c).iter().map(|t| t.to_string()).collect::<Vec<_>>();
+
+    let (mut space, _) = composer();
+    type_kyou(&mut space);
+    space.push_literal("OK");
+    assert!(space.begin_conversion());
+    assert_eq!(switched, texts(&space));
+    assert_eq!(switched, ["きょうOK", "kyouOK"]);
+}
+
+#[test]
+fn スペースモードで打ったかなに続く英字は_liveに切り替えると変換される() {
+    let (mut c, _) = composer();
+    type_kyou(&mut c);
+    c.push_literal("OK");
+    assert_eq!(c.preedit(), "きょうOK");
+    c.set_live(true);
+    assert_eq!(c.preedit(), "今日OK");
+    assert_eq!(c.commit_preview(), "今日OK");
+}
+
+#[test]
+fn 英語分割のかな混じりは_liveを切り替えても候補を保つ() {
+    let (mut c, _) = live_split_composer();
+    type_keys(&mut c, "artifactwoko");
+    c.flush_romaji();
+    assert_eq!(c.phase(), Phase::Mixed);
+    let before = c.reading.list.clone();
+    assert!(!before.is_empty());
+    c.set_live(false);
+    c.set_live(true);
+    assert_eq!(c.reading.list, before);
+}
+
+#[test]
+fn スペース変換のかなに続く英字は_かな部分を変換しない() {
+    let (mut c, log) = composer();
+    type_kyou(&mut c);
+    let converts = log.converts.borrow().len();
+    c.push_literal("T");
+    assert_eq!(c.preedit(), "きょうT");
+    assert_eq!(log.converts.borrow().len(), converts);
 }
 
 #[test]
