@@ -41,3 +41,5 @@ okinasou<space><enter>	翁層
 <live>sakanaOK<space><space><space><enter>	肴OK
 <live>sakana<enter>	肴
 <live>sakanaOK<enter>	肴OK
+# 打ちかけの子音で確定しても、っ までの打鍵 (kit) を英単語として覚えない。覚えると、あとの きっと が kit + と に分かれる
+kittok<enter>kittoiu<enter>	きっとkきっという
