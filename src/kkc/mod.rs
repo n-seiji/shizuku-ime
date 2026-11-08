@@ -2,7 +2,6 @@
 //!
 //! 辞書ファイル形式 (`dict` / `louds`)、ラティスと N-best Viterbi (`lattice`)、動的エントリ (`wise`)、
 //! 候補の組み立て (`result`) を持つ。IME から使うのは `RustEngine`。
-//! 学習は `learning` (設定 `learning_enabled` (環境変数 `SHIZUKU_DISABLE_LEARNING=1` で false) で無効)。
 #![forbid(unsafe_code)]
 
 pub mod check;
@@ -10,7 +9,6 @@ pub mod compare;
 pub mod dict;
 pub mod elem;
 pub mod lattice;
-pub mod learning;
 pub mod live_backspace;
 pub mod louds;
 pub mod result;
@@ -37,39 +35,29 @@ const MAX_SHOWN: usize = 30;
 pub struct KkcCore {
     dict: Dictionary,
     cache: RefCell<lattice::LookupCache>,
-    learning: RefCell<learning::Learning>,
     /// 辞書にない開発用語のカタカナ語 (`dev_kana_words.txt`)。`open` は空のまま (azooKey と同じ結果を保つ)。
     extra: lattice::ExtraWords,
 }
 
 impl KkcCore {
-    /// 学習なしで開く (差分テストや計測は学習の影響を受けない)。
+    /// 辞書だけで開く (差分テストや計測は辞書にないカタカナ語の影響を受けない)。
     pub fn open() -> Result<Self, DictError> {
-        Self::open_with_learning(learning::Learning::disabled())
+        Self::open_with_extra(lattice::ExtraWords::default())
     }
 
-    pub fn open_with_learning(learning: learning::Learning) -> Result<Self, DictError> {
-        Self::open_with_extra(learning, lattice::ExtraWords::default())
+    /// 辞書にないカタカナ語の一覧 (設定の `dev_kana_words_path`) も使って開く。IME 本体用。
+    pub fn open_with_config(config: &crate::config::Config) -> Result<Self, DictError> {
+        Self::open_with_extra(lattice::ExtraWords::from_file(config.dev_kana_words_path.as_deref()))
     }
 
-    /// 学習に加えて、辞書にないカタカナ語の一覧 (設定の `dev_kana_words_path`) も使って開く。IME 本体用。
-    pub fn open_with_config(learning: learning::Learning, config: &crate::config::Config) -> Result<Self, DictError> {
-        Self::open_with_extra(learning, lattice::ExtraWords::from_file(config.dev_kana_words_path.as_deref()))
-    }
-
-    fn open_with_extra(learning: learning::Learning, extra: lattice::ExtraWords) -> Result<Self, DictError> {
-        Ok(Self {
-            dict: Dictionary::open_default()?,
-            cache: RefCell::new(lattice::LookupCache::new()),
-            learning: RefCell::new(learning),
-            extra,
-        })
+    fn open_with_extra(extra: lattice::ExtraWords) -> Result<Self, DictError> {
+        Ok(Self { dict: Dictionary::open_default()?, cache: RefCell::new(lattice::LookupCache::new()), extra })
     }
 
     /// 一覧の語を文字列で渡して開く (テスト用)。
     #[cfg(test)]
-    pub fn open_with_words(learning: learning::Learning, words: &str) -> Result<Self, DictError> {
-        Self::open_with_extra(learning, lattice::ExtraWords::parse(words))
+    pub fn open_with_words(words: &str) -> Result<Self, DictError> {
+        Self::open_with_extra(lattice::ExtraWords::parse(words))
     }
 
     #[cfg(test)]
@@ -77,35 +65,12 @@ impl KkcCore {
         !self.extra.is_empty()
     }
 
-    #[cfg(test)]
-    pub fn learning(&self) -> &RefCell<learning::Learning> {
-        &self.learning
-    }
-
-    /// 候補の語のうち、かなだけではない語 (翁・皆) が学習済みか。そう・だ のような頻出のかなは数えない。
-    pub fn has_learned(&self, data: &[Rc<elem::Elem>]) -> bool {
-        let learning = self.learning.borrow();
-        let mut found = Vec::new();
-        data.iter().any(|e| {
-            found.clear();
-            learning.lookup(&e.ruby, &mut found);
-            let ruby_chars = e.ruby.chars().count();
-            e.word.chars().any(|c| !('\u{3041}'..='\u{309F}').contains(&c))
-                && found.iter().any(|f| f.ruby_chars == ruby_chars && f.elem.word == e.word && f.elem.lcid == e.lcid && f.elem.rcid == e.rcid)
-        })
-    }
-
-    /// 確定した候補のデータを学習する。
-    pub fn learn(&self, data: &[Rc<elem::Elem>]) {
-        self.learning.borrow_mut().learn(data, &|c| self.dict.char_id(c) != 255);
-    }
-
-    /// 読みがそのまま辞書の見出しにあるか。トライを 1 本たどるだけで、ラティスは作らない。学習・動的な語は見ない。
+    /// 読みがそのまま辞書の見出しにあるか。トライを 1 本たどるだけで、ラティスは作らない。動的な語は見ない。
     pub fn has_reading(&self, hiragana: &str) -> bool {
         !self.headwords(&dict::to_katakana(hiragana)).is_empty()
     }
 
-    /// その読みで始まる辞書の見出しがあるか (あぴー → アピール)。読みそのものが見出しでなくてもよい。学習・動的な語は見ない。辞書が読めなければ false。
+    /// その読みで始まる辞書の見出しがあるか (あぴー → アピール)。読みそのものが見出しでなくてもよい。動的な語は見ない。辞書が読めなければ false。
     pub fn has_reading_prefix(&self, hiragana: &str) -> bool {
         self.dict.has_reading_prefix(&dict::to_katakana(hiragana)).unwrap_or(false)
     }
@@ -117,7 +82,7 @@ impl KkcCore {
         self.headwords(katakana).iter().any(|e| e.word == kanji)
     }
 
-    /// カタカナの読みがちょうど一致する辞書の見出し。学習・動的な語は見ない。辞書が読めなければ空。
+    /// カタカナの読みがちょうど一致する辞書の見出し。動的な語は見ない。辞書が読めなければ空。
     fn headwords(&self, katakana: &str) -> Vec<dict::Entry> {
         self.dict.prefix_entries(katakana).map(|v| v.into_iter().filter(|e| e.ruby == katakana).collect()).unwrap_or_default()
     }
@@ -133,16 +98,10 @@ impl KkcCore {
         }
         let katakana = dict::to_katakana(reading);
         let chars: Vec<char> = katakana.chars().collect();
-        let learning = self.learning.borrow();
-        let mut lat = lattice::Lattice::build(&self.dict, &mut self.cache.borrow_mut(), &learning, &self.extra, &chars);
+        let mut lat = lattice::Lattice::build(&self.dict, &mut self.cache.borrow_mut(), &self.extra, &chars);
         lat.run(&self.dict, N_BEST, open_from);
         result::process(&self.dict, &lat, &katakana)
     }
-}
-
-/// 学習データの置き場所。英語の記憶 (english_memory) も同じ場所に置く。
-pub fn learning_dir(config: &crate::config::Config) -> Option<std::path::PathBuf> {
-    learning::default_dir(config)
 }
 
 /// 辞書を開けなかったときに、次に開き直すまで空ける時間。コントローラ (入力クライアント) が増えるたびに
@@ -202,7 +161,7 @@ pub fn shared_core() -> Option<Rc<KkcCore>> {
     CORE.with(|c| {
         c.borrow_mut().get(
             std::time::Instant::now(),
-            || KkcCore::open_with_config(learning::Learning::from_config(crate::config::get()), crate::config::get()).map_err(|e| e.to_string()),
+            || KkcCore::open_with_config(crate::config::get()).map_err(|e| e.to_string()),
             crate::platform::log,
         )
     })
@@ -230,7 +189,7 @@ pub struct RustEngine {
     context: String,
     /// いまのアプリが英語を打つアプリか (`context::ContextStore::is_english_app`)。行頭でも審判に聞くかの判断に使う。
     english_app: bool,
-    /// 直近の変換の revision と、返した候補ごとの `Candidate.data`。`select` の検証と学習用。
+    /// 直近の変換の revision と、返した候補ごとの `Candidate.data`。`words` が読む。
     last: Option<(u64, Vec<Vec<Rc<elem::Elem>>>)>,
 }
 
@@ -328,14 +287,14 @@ fn nasou_candidates(core: &KkcCore, katakana: &str, trailing_punct: &str, exclud
     (added, preferred)
 }
 
-/// 〜なそう の動詞形 (`preferred`) がある読みで、先頭が動詞形でも学習した候補でもないとき、動詞形を先頭にする。
+/// 〜なそう の動詞形 (`preferred`) がある読みで、先頭が動詞形でないとき、動詞形を先頭にする。
 /// 審判は 翁草 > 起きなそう と見るが、〜なそう で終わる読みは動詞の否定の方が普通なので審判の上に置く。残りは今の並びのまま。
 /// `ranked[j]` は j 番目の全文枠に入る候補の添字 (`texts` の添字)。審判があれば動詞形のうち審判の順で最初のもの、なければ `preferred` の順で最初のもの。
-fn promote_derived(ranked: &mut Vec<usize>, texts: &[String], preferred: &[String], judged: bool, learned: &dyn Fn(usize) -> bool) {
+fn promote_derived(ranked: &mut Vec<usize>, texts: &[String], preferred: &[String], judged: bool) {
     let Some(&top) = ranked.first() else {
         return;
     };
-    if preferred.is_empty() || preferred.contains(&texts[top]) || learned(top) {
+    if preferred.is_empty() || preferred.contains(&texts[top]) {
         return;
     }
     let pick = if judged {
@@ -403,11 +362,6 @@ fn append_punct(core: &KkcCore, cand: &mut result::Cand, trailing_punct: &str, e
     }
 }
 
-fn without_trailing_punct(data: &[Rc<elem::Elem>]) -> &[Rc<elem::Elem>] {
-    let is_punct = |e: &Rc<elem::Elem>| e.ruby.chars().all(|c| TRAILING_PUNCT.contains(c));
-    data.iter().rposition(|e| !is_punct(e)).map_or(data, |last| &data[..=last])
-}
-
 impl Default for RustEngine {
     fn default() -> Self {
         Self::new()
@@ -416,7 +370,7 @@ impl Default for RustEngine {
 
 impl CandidateEngine for RustEngine {
     /// 全文候補 (Full) だけを審判で並べ替え、それぞれ元の枠に入れ直す。審判が使えなければ engine の順。
-    /// `last` (学習用) も同じ並びで持つので、添字と学習データはずれない。
+    /// `last` も同じ並びで持つので、添字と語の情報はずれない。
     fn convert(&mut self, revision: u64, hiragana: &str) -> Vec<String> {
         let Some(core) = &self.core else {
             return Vec::new();
@@ -438,29 +392,13 @@ impl CandidateEngine for RustEngine {
         let scores: Vec<f32> = slots.iter().map(|&i| top[i].value).collect();
         let judged = (self.judge)(&self.context, &refs, &scores).filter(|r| is_permutation(r, slots.len()));
         let mut ranked = judged.clone().unwrap_or_else(|| (0..slots.len()).collect());
-        promote_derived(&mut ranked, &texts, &preferred, judged.is_some(), &|k| core.has_learned(&top[slots[k]].data));
+        promote_derived(&mut ranked, &texts, &preferred, judged.is_some());
         for (&slot, k) in slots.iter().zip(ranked) {
             order[slot] = slots[k];
         }
         let texts: Vec<String> = order.iter().map(|&i| top[i].text.replace('\u{1F}', "")).collect();
         self.last = Some((revision, order.iter().map(|&i| top[i].data.clone()).collect()));
         texts
-    }
-
-    /// revision と添字を確かめて、選ばれた候補を学習する (保存まで行う)。
-    /// 学習の可否は呼び出し側 (Composer::commit) で判定済みの前提。直接呼ぶとゲートを素通りする。
-    fn select(&mut self, revision: u64, engine_index: usize) -> bool {
-        let last = self.last.take();
-        let (Some(core), Some((r, candidates))) = (&self.core, last) else {
-            return false;
-        };
-        match candidates.get(engine_index) {
-            Some(data) if r == revision => {
-                core.learn(without_trailing_punct(data));
-                true
-            }
-            _ => false,
-        }
     }
 
     fn cancel(&mut self) {
@@ -499,7 +437,6 @@ impl CandidateEngine for RustEngine {
         (self.compare)(&self.context, raw, reading).is_some_and(|diff| diff <= -VETO_MARGIN)
     }
 
-    /// `last` を読むだけで取り出さない (`select` が学習に使う)。
     fn words(&self, revision: u64, index: usize) -> Option<Vec<(String, String)>> {
         let (r, candidates) = self.last.as_ref()?;
         if *r != revision {
@@ -515,11 +452,10 @@ impl CandidateEngine for RustEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::learning::Learning;
     use super::*;
 
-    fn engine(learning: Learning) -> RustEngine {
-        RustEngine::with_core(Rc::new(KkcCore::open_with_learning(learning).unwrap()))
+    fn engine() -> RustEngine {
+        RustEngine::with_core(Rc::new(KkcCore::open().unwrap()))
     }
 
     /// 上位 9 件のうち `want` の添字。
@@ -547,7 +483,7 @@ mod tests {
 
     #[test]
     fn judge_reverses_only_the_full_slots_in_the_displayed_order() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let slots = full_slots(&core, "かんじ");
         assert!(slots.len() >= 2, "前提: 全文候補が 2 つ以上 ({slots:?})");
         let base = RustEngine::with_core(core.clone()).with_judge(no_judge).convert(1, "かんじ");
@@ -563,23 +499,8 @@ mod tests {
     }
 
     #[test]
-    fn selecting_a_judge_reordered_candidate_learns_that_candidate() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
-        let slots = full_slots(&core, "かんじ");
-        let mut e = RustEngine::with_core(core.clone()).with_judge(reverse_judge);
-        let shown = e.convert(1, "かんじ");
-        // 審判で最後の全文候補が先頭の枠に来ている。それを選ぶ。
-        let picked = shown[slots[0]].clone();
-        assert_ne!(RustEngine::with_core(core.clone()).with_judge(no_judge).convert(9, "かんじ")[slots[0]], picked);
-        assert!(e.select(1, slots[0]));
-        // 審判なしで引き直すと、選んだ候補が (表示順ではなく中身で) 学習されて先頭に出る。
-        let after = RustEngine::with_core(core).with_judge(no_judge).convert(2, "かんじ");
-        assert_eq!(after[0], picked, "{after:?}");
-    }
-
-    #[test]
     fn a_broken_judge_result_keeps_the_engine_order() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let base = RustEngine::with_core(core.clone()).with_judge(no_judge).convert(1, "かんじ");
         let shown = RustEngine::with_core(core).with_judge(broken_judge).convert(1, "かんじ");
         assert_eq!(shown, base);
@@ -587,7 +508,7 @@ mod tests {
 
     #[test]
     fn has_reading_is_true_only_for_an_exact_dictionary_headword() {
-        let e = engine(Learning::in_memory());
+        let e = engine();
         assert!(e.has_reading("まで"));
         assert!(e.has_reading("さめ"));
         assert!(!e.has_reading("こっみと"));
@@ -597,7 +518,7 @@ mod tests {
 
     #[test]
     fn live_backspace_drops_only_the_reading_of_the_last_displayed_character() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let cases = [
             ("せんせい", "先生", 2),
             ("がくせい", "学生", 2),
@@ -618,44 +539,14 @@ mod tests {
     }
 
     #[test]
-    fn words_does_not_consume_the_learning_data() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
-        let mut e = RustEngine::with_core(core).with_judge(no_judge);
-        let cands = e.convert(1, "かいしゃ");
-        let i = index_of(&cands, "会社");
-        assert!(e.words(1, i).is_some());
-        assert!(e.select(1, i), "words の後も select できる");
-    }
-
-    #[test]
     fn words_is_none_for_a_stale_revision_or_an_unknown_index() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let mut e = RustEngine::with_core(core).with_judge(no_judge);
         let cands = e.convert(1, "かいしゃ");
         let i = index_of(&cands, "会社");
         assert_eq!(e.words(2, i), None);
         assert_eq!(e.words(1, 99), None);
         assert_eq!(e.words(1, i), Some(vec![("会社".to_string(), "カイシャ".to_string())]));
-    }
-
-    #[test]
-    fn selected_lower_candidate_comes_first_next_time() {
-        let mut e = engine(Learning::in_memory());
-        let before = e.convert(1, "かんじ");
-        let i = index_of(&before, "幹事");
-        assert!(i > 0, "前提: 幹事は最上位ではない ({before:?})");
-        assert!(e.select(1, i));
-        let after = e.convert(2, "かんじ");
-        assert_eq!(after[0], "幹事", "{after:?}");
-    }
-
-    #[test]
-    fn learned_word_also_helps_inside_a_longer_reading() {
-        let mut e = engine(Learning::in_memory());
-        let before = e.convert(1, "かんじ");
-        assert!(e.select(1, index_of(&before, "幹事")));
-        let after = e.convert(2, "かんじをかく");
-        assert!(after[0].starts_with("幹事"), "{after:?}");
     }
 
     #[test]
@@ -689,95 +580,6 @@ mod tests {
         assert_eq!(*core, 7);
         assert!(get(&mut slot, t0 + REOPEN_AFTER_FAILURE * 2, false).is_some(), "開けたあとは開き直さない");
         assert_eq!(opens.get(), 3);
-    }
-
-    #[test]
-    fn selecting_a_candidate_learns_it() {
-        let mut e = engine(Learning::in_memory());
-        let cands = e.convert(1, "かんじ");
-        assert!(e.core.as_ref().unwrap().learning().borrow().is_empty());
-        assert!(e.select(1, index_of(&cands, "幹事")));
-        assert!(!e.core.as_ref().unwrap().learning().borrow().is_empty());
-    }
-
-    #[test]
-    fn select_with_stale_revision_or_index_learns_nothing() {
-        let mut e = engine(Learning::in_memory());
-        let cands = e.convert(5, "かんじ");
-        assert!(!e.select(6, index_of(&cands, "幹事")));
-        e.convert(7, "かんじ");
-        assert!(!e.select(7, 99));
-        assert!(e.core.as_ref().unwrap().learning().borrow().is_empty());
-        assert!(!e.select(7, 0), "select のあとは状態が捨てられる");
-    }
-
-    #[test]
-    fn learning_survives_reopening_the_file() {
-        let dir = std::env::temp_dir().join(format!("shizuku-engine-learn-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let mut e = engine(Learning::open(&dir));
-        let before = e.convert(1, "かんじ");
-        assert!(e.select(1, index_of(&before, "幹事")));
-        e.core.as_ref().unwrap().learning().borrow().flush();
-        let mut e2 = engine(Learning::open(&dir));
-        assert_eq!(e2.convert(1, "かんじ")[0], "幹事");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// (読み, 確定する候補の順位 (1 始まり), 確定する回数)。事例は 1 つの記憶に積み上げる。
-    const LEARNING_CASES: &[(&str, usize, usize)] = &[
-        ("かんじ", 3, 1),
-        ("きかい", 2, 1),
-        ("こうえん", 3, 1),
-        ("せいかく", 2, 1),
-        ("はし", 4, 1),
-        ("かみ", 3, 1),
-        ("あめ", 2, 1),
-        ("いし", 3, 1),
-        ("きょうはいいてんきですね", 3, 1),
-        ("わたしのなまえはなかのです", 2, 1),
-        ("あしたかいしゃにいきます", 2, 1),
-        ("けんきゅうしつ", 3, 1),
-        ("ふくざつなもんだい", 2, 1),
-        ("おんがくをきく", 3, 1),
-        ("しゅうまつにかいものにいく", 2, 1),
-        ("はなをみる", 3, 2),
-        ("せいふのほうしん", 2, 1),
-        ("さくじつのかいぎ", 3, 1),
-        ("しょうがっこう", 4, 1),
-        ("そうだんにのってください", 2, 2),
-        ("ほんをよむ", 3, 1),
-        ("かてい", 3, 1),
-    ];
-
-    #[test]
-    fn confirmed_candidates_rise_when_accumulated() {
-        let mut e = engine(Learning::in_memory());
-        let mut rev = 0;
-        for &(reading, rank, times) in LEARNING_CASES {
-            rev += 1;
-            let before = e.convert(rev, reading);
-            let picked = before[rank - 1].clone();
-            for _ in 0..times {
-                rev += 1;
-                let list = e.convert(rev, reading);
-                let i = index_of(&list, &picked);
-                assert!(e.select(rev, i));
-            }
-            rev += 1;
-            let after = e.convert(rev, reading);
-            let now = index_of(&after, &picked);
-            assert!(now < rank - 1, "{reading}: {before:?} -> {after:?}");
-            e.cancel();
-        }
-    }
-
-    #[test]
-    fn disabled_learning_changes_nothing() {
-        let mut e = engine(Learning::disabled());
-        let before = e.convert(1, "かんじ");
-        assert!(e.select(1, index_of(&before, "幹事")));
-        assert_eq!(e.convert(2, "かんじ"), before);
     }
 
     thread_local! {
@@ -820,7 +622,7 @@ mod tests {
 
     #[test]
     fn 比べた差が余裕に届いたときだけ英語を選び_審判が使えなければ選ばない() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let mut e = RustEngine::with_core(core).with_compare(margin_of_four);
         e.set_context("claude ", false);
         assert!(e.prefers_text("code", "子で"));
@@ -833,7 +635,7 @@ mod tests {
 
     #[test]
     fn 文脈が空か日本語で終わるか改行で終わるときは審判に聞かず英語を選ばない() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let mut e = RustEngine::with_core(core).with_compare(margin_of_four);
         let before = COMPARED.with(|c| c.borrow().len());
         for context in ["", "机の", "今日は ", "hello\n", "hello\n\n"] {
@@ -845,7 +647,7 @@ mod tests {
 
     #[test]
     fn 英語のアプリでは行頭でも審判に聞くが_日本語の行の途中では聞かない() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let mut e = RustEngine::with_core(core).with_compare(margin_of_four);
         for context in ["hello\n", "今日は\n", "", "x\n  "] {
             e.set_context(context, true);
@@ -871,7 +673,7 @@ mod tests {
 
     #[test]
     fn 読みが余裕以上に自然なときだけ英字を退け_審判が使えなければ退けない() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let mut e = RustEngine::with_core(core).with_compare(margin_minus_two);
         assert!(e.rejects_english("imago", "今後"));
         e = e.with_compare(margin_minus_one);
@@ -880,17 +682,9 @@ mod tests {
         assert!(!e.rejects_english("imago", "今後"));
     }
 
-    /// 派生候補 (一棟貸し) を後ろに置く審判。`want` を先頭に、残りは元の順。
-    fn prefer_variant_judge(_context: &str, texts: &[&str], _scores: &[f32]) -> Option<Vec<usize>> {
-        let k = texts.iter().position(|t| *t == "一棟貸し")?;
-        let mut order: Vec<usize> = (0..texts.len()).filter(|&i| i != k).collect();
-        order.insert(0, k);
-        Some(order)
-    }
-
     #[test]
     fn 派生候補は全文候補の後ろに足され_審判なしでは元の全文候補が先に並ぶ() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let base = core.convert_all("いっとうがし");
         let n_full = base.main.iter().take(TOP_N).filter(|c| c.source == result::Source::Full).count();
         let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
@@ -924,7 +718,7 @@ mod tests {
 
     #[test]
     fn 翁が勝つ読みでも_動詞の否定から起きなそうが全文候補として入る() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let base = core.convert_all("おきなそう");
         assert!(base.main.iter().all(|c| c.text != "起きなそう"), "エンジン単体では出ない前提");
         let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
@@ -938,8 +732,8 @@ mod tests {
     }
 
     #[test]
-    fn 起きなそうは続き付きの読みでも読み全体を覆い_審判が選べば学習される() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+    fn 起きなそうは続き付きの読みでも読み全体を覆う() {
+        let core = Rc::new(KkcCore::open().unwrap());
         for (reading, want) in [("おきなそう", "起きなそう"), ("おきなそうです", "起きなそうです"), ("みなそう", "見なそう")] {
             let mut e = RustEngine::with_core(core.clone()).with_judge(want_first(want));
             let shown = e.convert(1, reading);
@@ -947,11 +741,6 @@ mod tests {
             let words = e.words(1, 0).unwrap();
             assert_eq!(words.iter().map(|(_, r)| r.as_str()).collect::<String>(), dict::to_katakana(reading), "{reading}");
         }
-        let mut e = RustEngine::with_core(core.clone()).with_judge(want_first("起きなそう"));
-        e.convert(1, "おきなそう");
-        assert!(e.select(1, 0));
-        let after = RustEngine::with_core(core).with_judge(no_judge).convert(2, "おきなそう");
-        assert_eq!(after[0], "起きなそう", "{after:?}");
     }
 
     /// 名詞形 (翁草・翁そうだ・皆そう) を先頭にする審判。動詞形は後ろへ回す。
@@ -964,7 +753,7 @@ mod tests {
 
     #[test]
     fn 審判が名詞形を好んでも_動詞形が先頭で_残りは審判の順() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         for (reading, want, noun) in [("おきなそう", "起きなそう", "翁草"), ("おきなそうだ", "起きなそうだ", "翁そうだ"), ("おきなそうです", "起きなそうです", "翁そうです"), ("みなそう", "見なそう", "皆そう")] {
             let mut e = RustEngine::with_core(core.clone()).with_judge(noun_first_judge);
             let shown = e.convert(1, reading);
@@ -976,7 +765,7 @@ mod tests {
 
     #[test]
     fn 末尾に句読点が付いても_動詞形が先頭で_残りは審判の順() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         for (reading, want, noun) in [("おきなそうだ。", "起きなそうだ。", "翁そうだ。"), ("みなそう！", "見なそう！", "皆そう！")] {
             let mut e = RustEngine::with_core(core.clone()).with_judge(noun_first_judge);
             let shown = e.convert(1, reading);
@@ -987,8 +776,8 @@ mod tests {
     }
 
     #[test]
-    fn 先頭を替えても学習用の添字は表示とずれない() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+    fn 先頭を替えても_wordsの添字は表示とずれない() {
+        let core = Rc::new(KkcCore::open().unwrap());
         let mut e = RustEngine::with_core(core).with_judge(noun_first_judge);
         let shown = e.convert(1, "おきなそう");
         for (i, text) in shown.iter().enumerate() {
@@ -998,19 +787,8 @@ mod tests {
     }
 
     #[test]
-    fn 翁草を選ぶと_次からは動詞形ではなく翁草が先頭() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
-        let mut e = RustEngine::with_core(core.clone()).with_judge(noun_first_judge);
-        let shown = e.convert(1, "おきなそう");
-        assert_eq!(shown[0], "起きなそう");
-        assert!(e.select(1, index_of(&shown, "翁草")));
-        let mut e = RustEngine::with_core(core).with_judge(noun_first_judge);
-        assert_eq!(e.convert(2, "おきなそう")[0], "翁草");
-    }
-
-    #[test]
     fn 形容詞の読みには動詞形を足さず_先頭も変えない() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         for reading in ["はかなそう", "あぶなそう", "きたなそう", "すくなそう", "おさなそう", "つたなそう", "はなそう"] {
             let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
             let shown = e.convert(1, reading);
@@ -1025,14 +803,12 @@ mod tests {
         let texts: Vec<String> = ["翁草", "起きなそう", "翁そう"].iter().map(|s| s.to_string()).collect();
         let pref = vec!["起きなそう".to_string()];
         let mut r = vec![1, 0, 2];
-        promote_derived(&mut r, &texts, &pref, true, &|_| false);
+        promote_derived(&mut r, &texts, &pref, true);
         assert_eq!(r, [1, 0, 2]);
         let mut r = vec![0, 1, 2];
-        promote_derived(&mut r, &texts, &[], true, &|_| false);
+        promote_derived(&mut r, &texts, &[], true);
         assert_eq!(r, [0, 1, 2]);
-        promote_derived(&mut r, &texts, &pref, true, &|_| true);
-        assert_eq!(r, [0, 1, 2], "学習した候補が先頭ならそのまま");
-        promote_derived(&mut r, &texts, &pref, true, &|_| false);
+        promote_derived(&mut r, &texts, &pref, true);
         assert_eq!(r, [1, 0, 2]);
     }
 
@@ -1041,16 +817,16 @@ mod tests {
         let texts: Vec<String> = ["翁草", "置きなそう", "起きなそう"].iter().map(|s| s.to_string()).collect();
         let pref = vec!["起きなそう".to_string(), "置きなそう".to_string()];
         let mut r = vec![0, 1, 2];
-        promote_derived(&mut r, &texts, &pref, true, &|_| false);
+        promote_derived(&mut r, &texts, &pref, true);
         assert_eq!(r, [1, 0, 2]);
         let mut r = vec![0, 1, 2];
-        promote_derived(&mut r, &texts, &pref, false, &|_| false);
+        promote_derived(&mut r, &texts, &pref, false);
         assert_eq!(r, [2, 0, 1]);
     }
 
     #[test]
     fn 動詞でない否定や読みが違うときは足さない() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         for reading in ["はなそう", "かなそう", "おなそう", "みなさん", "おきな", "おきない"] {
             let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
             let shown = e.convert(1, reading);
@@ -1066,7 +842,7 @@ mod tests {
 
     #[test]
     fn 派生候補の語列は表記も読みも表示と読みに一致する() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let mut e = RustEngine::with_core(core).with_judge(no_judge);
         let cands = e.convert(1, "べっそうのいっとうがし");
         let i = index_of(&cands, "別荘の一棟貸し");
@@ -1080,7 +856,7 @@ mod tests {
 
     #[test]
     fn 数詞と助数詞の派生はライブのbackspaceで末尾の字の読みだけを落とす() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let cases = [("いっとうがし", "一棟貸し", 1), ("いっとう", "一棟", 2)];
         for (reading, word, want) in cases {
             let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
@@ -1090,19 +866,6 @@ mod tests {
             let dropped = live_backspace::drop_len(&words, reading, word, |s, k| e.has_kanji_reading(s, k));
             assert_eq!(dropped.map(|d| d.len), Some(want), "{word}");
         }
-    }
-
-    #[test]
-    fn 審判が選んだ派生候補を確定すると学習され_審判なしでも次は先頭に出る() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
-        let mut e = RustEngine::with_core(core.clone()).with_judge(prefer_variant_judge);
-        let shown = e.convert(1, "いっとうがし");
-        assert_eq!(shown[0], "一棟貸し");
-        let before = RustEngine::with_core(core.clone()).with_judge(no_judge).convert(5, "いっとうがし");
-        assert_ne!(before[0], "一棟貸し");
-        assert!(e.select(1, 0));
-        let after = RustEngine::with_core(core).with_judge(no_judge).convert(2, "いっとうがし");
-        assert_eq!(after[0], "一棟貸し", "{after:?}");
     }
 
     /// 先頭 (TOP_N + 派生候補) の長さ。審判なし・tail なしの旧来の返り値の長さと同じ。
@@ -1116,7 +879,7 @@ mod tests {
     #[test]
     #[ignore = "measurement only"]
     fn measure_candidate_counts() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         for reading in ["かんじ", "こうしょう", "きしゃ", "いっとう", "きょうはいいてんきですね"] {
             let main = core.convert_all(reading).main;
             let whole = main.iter().skip(TOP_N).filter(|c| c.ruby() == dict::to_katakana(reading)).count();
@@ -1127,7 +890,7 @@ mod tests {
 
     #[test]
     fn homophones_past_the_head_are_shown_and_cover_the_whole_reading() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
         let shown = e.convert(1, "かんじ");
         let head = head_len(&core, "かんじ");
@@ -1146,7 +909,7 @@ mod tests {
 
     #[test]
     fn a_sentence_gets_no_partial_cover_candidates_in_the_tail() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let reading = "きょうはいいてんきですね";
         let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
         let shown = e.convert(1, reading);
@@ -1159,7 +922,7 @@ mod tests {
 
     #[test]
     fn the_judge_moves_only_the_head_and_the_tail_keeps_the_engine_order() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let head = head_len(&core, "かんじ");
         let plain = RustEngine::with_core(core.clone()).with_judge(no_judge).convert(1, "かんじ");
         let reversed = RustEngine::with_core(core).with_judge(reverse_judge).convert(1, "かんじ");
@@ -1174,18 +937,14 @@ mod tests {
     }
 
     #[test]
-    fn a_tail_candidate_has_its_data_and_is_learned_into_an_earlier_slot() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+    fn a_tail_candidate_has_its_data() {
+        let core = Rc::new(KkcCore::open().unwrap());
         let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
         let shown = e.convert(1, "かんじ");
         let i = shown.len() - 1;
         assert!(i >= TOP_N);
         let words = e.words(1, i).unwrap();
         assert_eq!(words.iter().map(|(w, _)| w.as_str()).collect::<String>(), shown[i]);
-        assert!(e.select(1, i));
-        let after = RustEngine::with_core(core).with_judge(no_judge).convert(2, "かんじ");
-        let now = after.iter().position(|t| *t == shown[i]).expect("まだ表示される");
-        assert!(now < i, "{now} < {i}");
     }
 
     fn judged_pool(core: &Rc<KkcCore>, reading: &str) -> Vec<(String, f32)> {
@@ -1210,8 +969,7 @@ mod tests {
     fn wide_lattice_full(core: &KkcCore, reading: &str) -> Vec<(String, f32)> {
         let katakana = dict::to_katakana(reading);
         let chars: Vec<char> = katakana.chars().collect();
-        let learning = core.learning.borrow();
-        let mut lat = lattice::Lattice::build(&core.dict, &mut core.cache.borrow_mut(), &learning, &core.extra, &chars);
+        let mut lat = lattice::Lattice::build(&core.dict, &mut core.cache.borrow_mut(), &core.extra, &chars);
         lat.run(&core.dict, WIDE_N_BEST, None);
         let main = result::process(&core.dict, &lat, &katakana).main;
         main.into_iter().filter(|c| c.source == result::Source::Full).map(|c| (c.text.replace('\u{1F}', ""), c.value)).collect()
@@ -1234,7 +992,7 @@ mod tests {
 
     #[test]
     fn the_connection_cost_to_the_punctuation_orders_the_full_candidates() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let mut e = RustEngine::with_core(core).with_judge(no_judge);
         assert_eq!(e.convert(1, "きょう")[0], "強");
         assert_eq!(e.convert(2, "きょう、")[0], "今日、");
@@ -1242,7 +1000,7 @@ mod tests {
 
     #[test]
     fn a_split_that_connects_better_to_the_punctuation_is_not_lost_before_it_is_scored() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
         assert_eq!(e.convert(1, "こんにちは。げんきですか？")[0], "こんにちは。元気ですか？");
         assert_eq!(e.convert(2, "おおいた！")[0], "大分！");
@@ -1254,7 +1012,7 @@ mod tests {
 
     #[test]
     fn a_punctuated_reading_is_ranked_as_a_lattice_with_room_for_every_path() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         for reading in ["おおさかじょ？", "ごおんじょ。", "さいれんらく！", "おおいた！", "きょう、"] {
             assert_eq!(judged_pool(&core, reading), wide_lattice_full(&core, reading), "{reading}");
         }
@@ -1262,7 +1020,7 @@ mod tests {
 
     #[test]
     fn a_candidate_is_never_scored_below_what_the_lattice_gives_the_same_text() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         for reading in PUNCTUATED {
             let pool = judged_pool(&core, reading);
             let main = core.convert_all(reading).main;
@@ -1280,7 +1038,7 @@ mod tests {
 
     #[test]
     fn the_judge_scores_the_full_candidates_with_their_trailing_punctuation() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         for (reading, right) in [("こうえんをきく。", "講演を聞く。"), ("あめがふりそうだからかさをもっていって。", "雨が降りそうだから傘を持っていって。")] {
             let shown = RustEngine::with_core(core.clone()).with_judge(no_judge).convert(1, reading);
             let judged: Vec<String> = judged_pool(&core, reading).into_iter().map(|(t, _)| t).collect();
@@ -1291,8 +1049,8 @@ mod tests {
     }
 
     #[test]
-    fn a_punctuated_candidate_keeps_the_punctuation_in_its_words_and_is_learned_without_it() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+    fn a_punctuated_candidate_keeps_the_punctuation_in_its_words() {
+        let core = Rc::new(KkcCore::open().unwrap());
         let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
         let shown = e.convert(1, "こうえんをきく。");
         let i = index_of(&shown, "公演を聴く。");
@@ -1300,17 +1058,11 @@ mod tests {
         assert_eq!(words.iter().map(|(w, _)| w.as_str()).collect::<String>(), "公演を聴く。");
         assert_eq!(words.iter().map(|(_, r)| r.as_str()).collect::<String>(), "コウエンヲキク。");
         assert_eq!(words.last().map(|(w, r)| (w.as_str(), r.as_str())), Some(("。", "。")));
-        assert_ne!(shown[0], "公演を聴く。", "前提: 選ぶ前は先頭ではない");
-        assert!(e.select(1, i));
-        let mut after = RustEngine::with_core(core).with_judge(no_judge);
-        assert_eq!(after.convert(2, "こうえんをきく。")[0], "公演を聴く。");
-        assert_eq!(after.convert(3, "こうえんをきく")[0], "公演を聴く");
-        assert_eq!(after.convert(4, "こうえんをきく！")[0], "公演を聴く！");
     }
 
     #[test]
     fn a_reading_without_kana_before_the_punctuation_converts_as_before() {
-        let core = Rc::new(KkcCore::open_with_learning(Learning::in_memory()).unwrap());
+        let core = Rc::new(KkcCore::open().unwrap());
         let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
         for reading in ["。", "！？", "「」", "『』", "1。", "abc。"] {
             let shown = e.convert(1, reading);
@@ -1325,7 +1077,7 @@ mod tests {
     const KANA_WORDS: &str = "# 注釈\nリファクタ\nリベース\nabc\n";
 
     fn words_engine(words: &str) -> RustEngine {
-        RustEngine::with_core(Rc::new(KkcCore::open_with_words(Learning::in_memory(), words).unwrap())).with_judge(no_judge)
+        RustEngine::with_core(Rc::new(KkcCore::open_with_words(words).unwrap())).with_judge(no_judge)
     }
 
     #[test]
@@ -1333,7 +1085,7 @@ mod tests {
         let mut e = words_engine(KANA_WORDS);
         assert_eq!(e.convert(1, "りふぁくた")[0], "リファクタ");
         assert_eq!(e.convert(2, "りふぁくたする")[0], "リファクタする");
-        let core = KkcCore::open_with_words(Learning::in_memory(), KANA_WORDS).unwrap();
+        let core = KkcCore::open_with_words(KANA_WORDS).unwrap();
         let converted = core.convert_all("りふぁくた");
         assert_eq!(converted.main[0].source, result::Source::Full, "審判の対象になる全文候補");
         assert_eq!(converted.main.iter().filter(|c| c.text == "リファクタ").count(), 1, "重複しない");
@@ -1341,7 +1093,7 @@ mod tests {
 
     #[test]
     fn 一覧を入れても一覧にない読みの結果は変わらない() {
-        let with = KkcCore::open_with_words(Learning::disabled(), KANA_WORDS).unwrap();
+        let with = KkcCore::open_with_words(KANA_WORDS).unwrap();
         let without = KkcCore::open().unwrap();
         for reading in ["きょうはいいてんきですね", "かんじ", "ふぁいるをひらく"] {
             let texts = |c: &KkcCore| c.convert_all(reading).main.iter().map(|x| (x.text.clone(), x.value.to_bits())).collect::<Vec<_>>();
@@ -1350,12 +1102,7 @@ mod tests {
     }
 
     #[test]
-    fn 一覧のカタカナ語を選ぶと学習され_open_は一覧を持たない() {
-        let core = Rc::new(KkcCore::open_with_words(Learning::in_memory(), KANA_WORDS).unwrap());
-        let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
-        e.convert(1, "りふぁくた");
-        assert!(e.select(1, 0));
-        assert_eq!(RustEngine::with_core(core).with_judge(no_judge).convert(2, "りふぁくた")[0], "リファクタ");
+    fn open_は一覧を持たない() {
         assert!(!KkcCore::open().unwrap().has_extra_words());
         assert_ne!(KkcCore::open().unwrap().convert_all("りふぁくた").main[0].text, "リファクタ");
     }

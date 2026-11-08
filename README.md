@@ -30,7 +30,7 @@
 - **変換** — Space で変換、Enter で確定。ローマ字の表は Mozc と同じ。
 - **英語** — かなにならない英単語は英字のまま。一度英語で確定した語は、次から英字で出る。
 - **候補** — カタカナ語の英単語 (デスクトップ → desktop) と絵文字 (ねこ → 🐈) も出る。
-- **学習** — 選んだ候補を次から先に出す。パスワード欄とパスワード管理アプリでは覚えない。
+- **記憶** — 英語で確定した語を覚える。パスワード欄とパスワード管理アプリでは覚えない。
 - **並べ替え** — 小さな日本語言語モデルを Mac の中で動かし、文全体の候補を自然な順にする。
 - **ライブ変換 (任意)** — 打ちながら変換する。入力メニューで切り替える。
 
@@ -48,7 +48,7 @@ macOS 26 以降、Apple Silicon のみ。
 1. 入力ソースから Shizuku を外す。
 2. `~/Library/Input Methods/Shizuku.app` を削除する。
 3. `pkgutil --forget dev.n-seiji.inputmethod.Shizuku.pkg --volume ~` を実行する。
-4. 学習と設定も消すなら、`~/Library/Application Support/Shizuku`、`~/Library/Logs/Shizuku`、`~/Library/Preferences/dev.n-seiji.inputmethod.Shizuku.plist` を削除する。
+4. 記憶と設定も消すなら、`~/Library/Application Support/Shizuku`、`~/Library/Logs/Shizuku`、`~/Library/Preferences/dev.n-seiji.inputmethod.Shizuku.plist` を削除する。
 
 **ソースからビルド:** [mise](https://mise.jdx.dev/) と Rust が必要。`judge-model` は並べ替え用のモデル (約 41 MB) を取得する。省くと変換エンジン本来の順で動く。
 
@@ -72,7 +72,7 @@ mise run install
 
 ## プライバシー
 
-実行時にネットワークを使わない。CI が `scripts/check-no-network.sh` で確かめている。学習データは `~/Library/Application Support/Shizuku/rust-learning/` にだけ保存する。
+実行時にネットワークを使わない。CI が `scripts/check-no-network.sh` で確かめている。記憶データは `~/Library/Application Support/Shizuku/rust-learning/` にだけ保存する。
 
 ## クレジット・ライセンス
 

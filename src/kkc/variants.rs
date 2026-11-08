@@ -61,7 +61,7 @@ const COUNTERS: &[(&str, &[&str])] = &[
     ("泊", &["ハク", "パク"]),
 ];
 
-/// 派生候補。`data` は学習にそのまま使う。
+/// 派生候補。`data` は候補の語列で、`words` が返す。
 #[derive(Debug, Clone)]
 pub struct Variant {
     pub text: String,
