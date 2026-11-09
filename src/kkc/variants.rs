@@ -9,8 +9,8 @@ use std::rc::Rc;
 use super::dict::Entry;
 use super::elem::{Elem, CID_NUMBER, CID_PROPER_NOUN};
 
-/// 派生候補の元にする全文候補の数 (engine の順)
-pub const ORIGINS: usize = 4;
+/// 派生候補の元にする全文候補の数 (engine の順)。全文候補の枠が 15 (`TOP_N`) なので 8。出力は `MAX_VARIANTS` で頭打ち。
+pub const ORIGINS: usize = 8;
 /// 1 回の変換で足す派生候補の最大数
 pub const MAX_VARIANTS: usize = 3;
 /// 派生候補のスコアは元の候補から引く。審判が拮抗したときに元の候補を優先するための値。

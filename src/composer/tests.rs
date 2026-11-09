@@ -2357,3 +2357,32 @@ fn 英単語の直後のハイフンは読みに長音を足した見出しが�
     type_keys(&mut c, "made");
     assert!(!c.hyphen_continues_kana());
 }
+
+#[test]
+fn engineが後ろに同じrawを出していてもdanglingではrawが先頭に入り複製は消える() {
+    let engine = MockEngine { log: Log::default(), table: vec![("きょうh".to_string(), vec!["A".to_string(), "B".to_string(), "kyouh".to_string(), "C".to_string()])] };
+    let mut c = Composer::new(engine, FakeLexicon::default());
+    c.push_flush(Some("きょうh".into()));
+    c.push_input("kyouh", "", "");
+    assert_eq!(c.phase(), Phase::Dangling);
+    assert!(c.begin_conversion());
+    assert_eq!(texts(&c), vec!["kyouh", "A", "B", "C"]);
+    assert_eq!(c.candidates()[0].source, Source::Raw);
+    let ranks: Vec<Option<EngineRank>> = c.candidates().iter().map(|x| x.engine_rank()).collect();
+    assert_eq!(ranks, vec![None, Some(EngineRank(0)), Some(EngineRank(1)), Some(EngineRank(3))]);
+}
+
+#[test]
+fn engineが後ろに同じ英単語rawを出していても2番目に入り複製は消える() {
+    let engine = MockEngine {
+        log: Log::default(),
+        table: vec![("かず".to_string(), vec!["数".to_string(), "和".to_string(), "他".to_string(), "kazu".to_string()])],
+    };
+    let mut c = Composer::new(engine, FakeLexicon::default().with_english_word(|w| w == "kazu"));
+    c.push_input("kazu", "かず", "");
+    assert!(c.begin_conversion());
+    assert_eq!(texts(&c), vec!["数", "kazu", "和", "他"]);
+    assert_eq!(c.candidates()[1].source, Source::Raw);
+    let ranks: Vec<Option<EngineRank>> = c.candidates().iter().map(|x| x.engine_rank()).collect();
+    assert_eq!(ranks, vec![Some(EngineRank(0)), None, Some(EngineRank(1)), Some(EngineRank(2))]);
+}

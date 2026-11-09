@@ -4,7 +4,7 @@
 donewo<enter>	どねを
 done<space><pick:2>	done
 done<enter>	done
-the<space><pick:10>	the
+the<space><pick:16>	the
 the<enter>	the
 # 選んでいない語と、覚えた語に続く読みは分割しない
 madeni<enter>	までに

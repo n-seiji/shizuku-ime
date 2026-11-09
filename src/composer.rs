@@ -1530,7 +1530,7 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
     /// 英単語でない raw (kazu, dei) は候補としてはノイズなので末尾に回す (消さない)。
     fn insert_raw_candidate(&self, list: &mut Vec<Candidate>, phase: Phase, early: bool) {
         let raw = self.raw();
-        if raw.is_empty() || self.is_symbol() || list.iter().any(|c| c.text == raw) {
+        if raw.is_empty() || self.is_symbol() {
             return;
         }
         let is_early = phase == Phase::Dangling || self.is_english_word_raw(&raw);
@@ -1542,6 +1542,10 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
             _ if early => list.len().min(1),
             _ => list.len(),
         };
+        // エンジンが同じ ASCII 候補 (branch) を後ろに出していたら、その複製を消して raw の位置に入れる (広い N-best で起きる)。
+        if Self::claim_slot(list, &raw, position) {
+            return;
+        }
         list.insert(
             position,
             Candidate {

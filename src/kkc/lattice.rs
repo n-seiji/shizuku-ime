@@ -198,9 +198,29 @@ pub struct Lattice {
 /// `Lattice::run` の `open_from` 以降も上限を外さないのは、句読点 1 文字に要素が複数あり、句読点が続くと経路が文字ごとに倍々に増えるため (！？！？… で固まる)。
 const OPEN_N_BEST: usize = 512;
 
+/// `Lattice` が使う `regs` のバッファを変換の間で持ち回す入れ物。
+/// 変換ごとに 6MB 級の Vec を作って捨てると macOS の malloc が返さず RSS が 1 キーあたり数 MB ずつ増えるため、regs のバッファを変換間で使い回す。
+#[derive(Default)]
+pub struct Scratch {
+    regs: Vec<Reg>,
+}
+
+impl Scratch {
+    #[cfg(test)]
+    pub fn capacity(&self) -> usize {
+        self.regs.capacity()
+    }
+}
+
 impl Lattice {
+    /// 使い終わった `regs` のバッファを `scratch` に戻す (次の `build` が使い回す)。
+    pub fn recycle(mut self, scratch: &mut Scratch) {
+        self.regs.clear();
+        scratch.regs = self.regs;
+    }
+
     /// `extra` の語も辞書の語と同じようにノードにする (辞書の語のあとに並べる。`extra` は同じ語・読みが辞書にあれば足さない)。`chars` はカタカナ化済みの読み。
-    pub fn build(dict: &Dictionary, cache: &mut LookupCache, extra: &ExtraWords, chars: &[char]) -> Self {
+    pub fn build(dict: &Dictionary, cache: &mut LookupCache, extra: &ExtraWords, chars: &[char], scratch: &mut Scratch) -> Self {
         let n = chars.len();
         let mut nodes = vec![Node::new(Rc::new(Elem::bos()), 0, false)];
         let mut ranges = Vec::with_capacity(n);
@@ -238,7 +258,9 @@ impl Lattice {
             }
             ranges.push(from..nodes.len());
         }
-        let mut lattice = Self { nodes, ranges, regs: Vec::new(), eos: Vec::new(), surface_count: n };
+        let mut regs = std::mem::take(&mut scratch.regs);
+        regs.clear();
+        let mut lattice = Self { nodes, ranges, regs, eos: Vec::new(), surface_count: n };
         // 始点
         lattice.regs.push(Reg { node: 0, prev: NONE, total: 0.0 });
         for idx in lattice.ranges.first().cloned().unwrap_or(0..0) {
