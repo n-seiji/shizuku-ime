@@ -326,6 +326,23 @@ fn append_tail(top: &mut Vec<result::Cand>, rest: &[result::Cand], katakana: &st
     }
 }
 
+/// 数字を頭に付けて変換した結果から、数字をそのまま (11 のまま) 1 語で置いた候補だけを残し、その語を外す。数字だけの候補 (`11` の FirstClause) は外すと空になるので捨てる。
+fn strip_digit_prefix(mut converted: Converted, digits: &str) -> Converted {
+    converted.main = converted
+        .main
+        .into_iter()
+        .filter(|c| c.data.len() >= 2 && c.data[0].word == digits && c.data[0].ruby == digits && c.text.starts_with(digits))
+        .map(|mut c| {
+            let first = c.data.remove(0);
+            c.ruby_count = c.ruby_count.saturating_sub(first.ruby_len);
+            let rest = &c.text[digits.len()..];
+            c.text = rest.strip_prefix('\u{1F}').unwrap_or(rest).to_string();
+            c
+        })
+        .collect();
+    converted
+}
+
 const TRAILING_PUNCT: &str = "。、？！」』";
 
 fn body_before_punct(reading: &str) -> Option<&str> {
@@ -379,12 +396,26 @@ impl CandidateEngine for RustEngine {
             return Vec::new();
         }
         let body = body_before_punct(hiragana);
-        let converted = core.convert_all_open_tail(hiragana, body.map(|b| b.chars().count()));
+        let open_from = body.map(|b| b.chars().count());
+        let digits = crate::context::trailing_digits(&self.context);
+        let mut converted = None;
+        if !digits.is_empty() && hiragana.chars().next().is_some_and(variants::is_kana) {
+            // 直前に確定した数字 (同じ行) は読みの前に付けて変換し、候補から外す (11がつは -> 11月は)。
+            let prefixed = format!("{digits}{hiragana}");
+            let c = core.convert_all_open_tail(&prefixed, open_from.map(|n| n + digits.chars().count()));
+            converted = Some(strip_digit_prefix(c, digits)).filter(|c| !c.main.is_empty());
+        }
+        // 数字経路では読みそのまま (がつは / ガツハ) の候補が落ちるので、通常変換の全読み候補を末尾に補う。
+        let plain = if converted.is_some() { Some(core.convert_all_open_tail(hiragana, open_from)) } else { None };
+        let converted = converted.unwrap_or_else(|| core.convert_all_open_tail(hiragana, open_from));
         let mut top: Vec<result::Cand> = converted.main[..converted.main.len().min(TOP_N)].to_vec();
         let katakana = dict::to_katakana(hiragana);
         let preferred = add_variants(core, &mut top, &katakana, body.map_or("", |b| &hiragana[b.len()..]));
         let head_len = top.len();
         append_tail(&mut top, &converted.main[converted.main.len().min(TOP_N)..], &katakana);
+        if let Some(plain) = &plain {
+            append_tail(&mut top, &plain.main, &katakana);
+        }
         let mut order: Vec<usize> = (0..top.len()).collect();
         let slots: Vec<usize> = (0..head_len).filter(|&i| top[i].source == result::Source::Full).collect();
         let texts: Vec<String> = slots.iter().map(|&i| top[i].text.replace('\u{1F}', "")).collect();
@@ -453,6 +484,42 @@ impl CandidateEngine for RustEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_ctx(context: &str, reading: &str) -> (RustEngine, Vec<String>) {
+        let mut e = RustEngine::with_core(Rc::new(KkcCore::open().unwrap())).with_judge(no_judge);
+        e.set_context(context, false);
+        let c = e.convert(1, reading);
+        (e, c)
+    }
+
+    #[test]
+    fn digits_before_the_reading_help_the_engine_and_are_not_in_candidates() {
+        let (e, c) = with_ctx("11", "がつは");
+        assert_eq!(c[0], "月は", "{c:?}");
+        let i = index_of(&c, "月は");
+        let w = e.words(1, i).unwrap();
+        assert_eq!(w, vec![("月".to_string(), "ガツ".to_string()), ("は".to_string(), "ハ".to_string())]);
+        assert_eq!(with_ctx("/goal 11", "がつは").1[0], "月は");
+        assert_eq!(with_ctx("テスト11", "がつは").1[0], "月は");
+        assert_eq!(with_ctx("11", "こ").1[0], "個");
+        assert_eq!(with_ctx("11", "がつは。").1[0], "月は。");
+        assert!(c.iter().all(|t| !t.is_empty()), "{c:?}");
+        assert!(with_ctx("15", "じ").1.iter().all(|t| !t.is_empty()));
+        // 読みそのままとカタカナは数字経路でも選べる。
+        assert!(c.contains(&"がつは".to_string()) && c.contains(&"ガツハ".to_string()), "{c:?}");
+    }
+
+    #[test]
+    fn digits_not_at_the_end_of_the_current_line_are_ignored() {
+        assert_eq!(with_ctx("", "がつは").1[0], "がつは");
+        assert_eq!(with_ctx("11\n", "がつは").1[0], "がつは");
+        assert_eq!(with_ctx("11 ", "がつは").1[0], "がつは");
+    }
+
+    #[test]
+    fn digits_are_not_applied_to_a_non_kana_start() {
+        assert_eq!(with_ctx("3", "。").1, with_ctx("", "。").1);
+    }
 
     fn engine() -> RustEngine {
         RustEngine::with_core(Rc::new(KkcCore::open().unwrap()))
