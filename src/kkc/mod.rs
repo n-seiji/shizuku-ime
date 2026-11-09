@@ -24,10 +24,36 @@ use crate::composer::CandidateEngine;
 pub use dict::{DictError, Dictionary};
 pub use result::Converted;
 
-/// 保持する N-best の数 (本番の `ConvertRequestOptions.N_best`)
-const N_BEST: usize = 9;
+/// ラティスの保持数と文章全体の候補数。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// 各ノードで保持する N-best の数
+    pub n_best: usize,
+    /// 文章全体を変換した候補の上限
+    pub full: usize,
+    /// この文字数 (カタカナ化した読み) 以下の読みでは `full` ではなく `DEFAULT_FULL_COUNT` を使う。
+    /// 短い読みで全文候補を増やすと、複合語の切り分け (官時 艦時 ...) が並んで本物の同音語を押し出すため。
+    pub short_reading: usize,
+}
+
+impl Limits {
+    /// 読みの文字数 `len` のときの全文候補の上限。
+    pub fn full_for(&self, len: usize) -> usize {
+        if len <= self.short_reading {
+            result::DEFAULT_FULL_COUNT.min(self.full)
+        } else {
+            self.full
+        }
+    }
+
+    /// azooKey と同じ (本番の `ConvertRequestOptions.N_best` = 9、全文候補 5)。差分テストと計測用。
+    pub const PARITY: Limits = Limits { n_best: 9, full: result::DEFAULT_FULL_COUNT, short_reading: 0 };
+    /// IME 用。経路を多く残し、審判にかける全文候補を増やす。
+    pub const IME: Limits = Limits { n_best: 30, full: 15, short_reading: 3 };
+}
+
 /// 審判で並べ替える先頭の候補数 (派生候補はこの外に足す)
-const TOP_N: usize = 9;
+const TOP_N: usize = 15;
 /// IME に返す engine 候補の最大数。先頭 (TOP_N + 派生候補) の後ろに、読み全体を覆う候補だけを engine の順で足す
 const MAX_SHOWN: usize = 30;
 
@@ -35,29 +61,43 @@ const MAX_SHOWN: usize = 30;
 pub struct KkcCore {
     dict: Dictionary,
     cache: RefCell<lattice::LookupCache>,
-    /// 辞書にない開発用語のカタカナ語 (`dev_kana_words.txt`)。`open` は空のまま (azooKey と同じ結果を保つ)。
+    /// 変換間で使い回す regs のバッファ (`lattice::Scratch`)
+    scratch: RefCell<lattice::Scratch>,
+    /// 辞書にない開発用語のカタカナ語 (`dev_kana_words.txt`)。`open` は空のまま (azooKey と同じ結果を保つ)。上限 (`Limits`) も `open` は PARITY、`open_with_config` は IME。
     extra: lattice::ExtraWords,
+    limits: Limits,
 }
 
 impl KkcCore {
     /// 辞書だけで開く (差分テストや計測は辞書にないカタカナ語の影響を受けない)。
     pub fn open() -> Result<Self, DictError> {
-        Self::open_with_extra(lattice::ExtraWords::default())
+        Self::open_with_extra(lattice::ExtraWords::default(), Limits::PARITY)
     }
 
     /// 辞書にないカタカナ語の一覧 (設定の `dev_kana_words_path`) も使って開く。IME 本体用。
     pub fn open_with_config(config: &crate::config::Config) -> Result<Self, DictError> {
-        Self::open_with_extra(lattice::ExtraWords::from_file(config.dev_kana_words_path.as_deref()))
+        Self::open_with_extra(lattice::ExtraWords::from_file(config.dev_kana_words_path.as_deref()), Limits::IME)
     }
 
-    fn open_with_extra(extra: lattice::ExtraWords) -> Result<Self, DictError> {
-        Ok(Self { dict: Dictionary::open_default()?, cache: RefCell::new(lattice::LookupCache::new()), extra })
+    fn open_with_extra(extra: lattice::ExtraWords, limits: Limits) -> Result<Self, DictError> {
+        Ok(Self { dict: Dictionary::open_default()?, cache: RefCell::new(lattice::LookupCache::new()), scratch: RefCell::new(lattice::Scratch::default()), extra, limits })
     }
 
     /// 一覧の語を文字列で渡して開く (テスト用)。
     #[cfg(test)]
     pub fn open_with_words(words: &str) -> Result<Self, DictError> {
-        Self::open_with_extra(lattice::ExtraWords::parse(words))
+        Self::open_with_extra(lattice::ExtraWords::parse(words), Limits::PARITY)
+    }
+
+    /// 上限を指定して開く (テスト用)。
+    #[cfg(test)]
+    pub fn open_with_limits(limits: Limits) -> Result<Self, DictError> {
+        Self::open_with_extra(lattice::ExtraWords::default(), limits)
+    }
+
+    #[cfg(test)]
+    pub fn limits(&self) -> Limits {
+        self.limits
     }
 
     #[cfg(test)]
@@ -98,9 +138,12 @@ impl KkcCore {
         }
         let katakana = dict::to_katakana(reading);
         let chars: Vec<char> = katakana.chars().collect();
-        let mut lat = lattice::Lattice::build(&self.dict, &mut self.cache.borrow_mut(), &self.extra, &chars);
-        lat.run(&self.dict, N_BEST, open_from);
-        result::process(&self.dict, &lat, &katakana)
+        let mut scratch = self.scratch.borrow_mut();
+        let mut lat = lattice::Lattice::build(&self.dict, &mut self.cache.borrow_mut(), &self.extra, &chars, &mut scratch);
+        lat.run(&self.dict, self.limits.n_best, open_from);
+        let converted = result::process(&self.dict, &lat, &katakana, self.limits.full_for(chars.len()));
+        lat.recycle(&mut scratch);
+        converted
     }
 }
 
@@ -1036,9 +1079,9 @@ mod tests {
     fn wide_lattice_full(core: &KkcCore, reading: &str) -> Vec<(String, f32)> {
         let katakana = dict::to_katakana(reading);
         let chars: Vec<char> = katakana.chars().collect();
-        let mut lat = lattice::Lattice::build(&core.dict, &mut core.cache.borrow_mut(), &core.extra, &chars);
+        let mut lat = lattice::Lattice::build(&core.dict, &mut core.cache.borrow_mut(), &core.extra, &chars, &mut lattice::Scratch::default());
         lat.run(&core.dict, WIDE_N_BEST, None);
-        let main = result::process(&core.dict, &lat, &katakana).main;
+        let main = result::process(&core.dict, &lat, &katakana, Limits::PARITY.full).main;
         main.into_iter().filter(|c| c.source == result::Source::Full).map(|c| (c.text.replace('\u{1F}', ""), c.value)).collect()
     }
 
@@ -1179,5 +1222,95 @@ mod tests {
         let missing = std::path::Path::new("/nonexistent/dev_kana_words.txt");
         assert!(lattice::ExtraWords::from_file(Some(missing)).is_empty());
         assert!(lattice::ExtraWords::from_file(None).is_empty());
+    }
+    fn full_texts(core: &KkcCore, reading: &str) -> Vec<String> {
+        core.convert_all(reading).main.iter().filter(|c| c.source == result::Source::Full).map(|c| c.text.replace('\u{1F}', "")).collect()
+    }
+
+    #[test]
+    fn ime_limits_keep_whole_sentence_candidate_that_parity_drops() {
+        let want = "打ち間違い";
+        let ime = KkcCore::open_with_limits(Limits::IME).unwrap();
+        assert!(full_texts(&ime, "うちまちがい").iter().any(|t| t == want));
+        let parity = KkcCore::open().unwrap();
+        assert!(!full_texts(&parity, "うちまちがい").iter().any(|t| t == want));
+    }
+
+    #[test]
+    fn short_readings_use_the_default_full_count_even_with_ime_limits() {
+        let ime = KkcCore::open_with_limits(Limits::IME).unwrap();
+        let kanji = full_texts(&ime, "かんじ");
+        assert!(kanji.len() <= result::DEFAULT_FULL_COUNT, "{}", kanji.len());
+        let all: Vec<String> = ime.convert_all("かんじ").main.iter().map(|c| c.text.replace('\u{1F}', "")).collect();
+        assert!(!all.iter().any(|t| t == "官時"), "複合語の切り分けが並ばない");
+        assert!(full_texts(&ime, "うちまちがい").iter().any(|t| t == "打ち間違い"), "長い読みは 15 件のまま");
+        assert_eq!(Limits::IME.full_for(3), 5);
+        assert_eq!(Limits::IME.full_for(4), 15);
+        assert_eq!(Limits::PARITY.full_for(2), 5);
+        assert_eq!(Limits::PARITY.full_for(20), 5);
+    }
+
+    #[test]
+    fn parity_core_gives_at_most_the_default_full_count_for_any_length() {
+        let parity = KkcCore::open().unwrap();
+        assert_eq!(parity.limits(), Limits::PARITY);
+        for reading in ["うちまちがい", "きょうはいいてんきですね"] {
+            assert!(full_texts(&parity, reading).len() <= result::DEFAULT_FULL_COUNT, "{reading}");
+        }
+    }
+
+    #[test]
+    fn the_ime_entry_point_uses_ime_limits() {
+        let core = KkcCore::open_with_config(&crate::config::Config::inert()).unwrap();
+        assert_eq!(core.limits(), Limits::IME);
+    }
+
+    #[test]
+    fn ime_head_is_all_full_and_the_tail_covers_the_whole_reading() {
+        let core = Rc::new(KkcCore::open_with_limits(Limits::IME).unwrap());
+        let reading = "きょうはいいてんきですね";
+        let main = core.convert_all(reading).main;
+        assert!(main.len() > TOP_N);
+        assert!(main[..TOP_N].iter().all(|c| c.source == result::Source::Full), "先頭 {TOP_N} 件は全文候補だけ");
+        let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
+        let shown = e.convert(1, reading);
+        let head = head_len(&core, reading);
+        assert!(shown.len() > head);
+        let want = dict::to_katakana(reading);
+        for i in 0..shown.len() {
+            let ruby: String = e.words(1, i).unwrap().iter().map(|(_, r)| r.as_str()).collect();
+            if i >= head {
+                assert_eq!(ruby, want, "tail は読み全体を覆う");
+            }
+        }
+    }
+
+    #[test]
+    fn judge_reorders_only_the_head_with_ime_limits() {
+        let core = Rc::new(KkcCore::open_with_limits(Limits::IME).unwrap());
+        let reading = "うちまちがい";
+        let slots = full_slots(&core, reading);
+        assert!(slots.len() > result::DEFAULT_FULL_COUNT, "前提: IME の全文枠が 5 を超える ({slots:?})");
+        let base = RustEngine::with_core(core.clone()).with_judge(no_judge).convert(1, reading);
+        let shown = RustEngine::with_core(core.clone()).with_judge(reverse_judge).convert(1, reading);
+        let head = head_len(&core, reading);
+        assert_eq!(base.len(), shown.len());
+        assert_eq!(base[head..], shown[head..], "tail は審判で動かない");
+        let (mut a, mut b) = (base[..head].to_vec(), shown[..head].to_vec());
+        assert_ne!(a, b);
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "先頭の中で並べ替わるだけ");
+    }
+
+    #[test]
+    fn conversions_recycle_the_regs_buffer_instead_of_reallocating_it() {
+        let core = KkcCore::open_with_limits(Limits::IME).unwrap();
+        assert_eq!(core.scratch.borrow().capacity(), 0);
+        core.convert_all("きょうはいいてんきですね");
+        let first = core.scratch.borrow().capacity();
+        assert!(first > 0, "変換後に buffer が戻る");
+        core.convert_all("かんじ");
+        assert!(core.scratch.borrow().capacity() >= first, "短い読みでも縮まない");
     }
 }

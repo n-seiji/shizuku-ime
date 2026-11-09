@@ -278,8 +278,11 @@ pub struct Converted {
     pub first_clause: Vec<Cand>,
 }
 
-/// `processResult`。`reading_katakana` は読み全体 (カタカナ化済み)。
-pub fn process(dict: &Dictionary, lattice: &Lattice, reading_katakana: &str) -> Converted {
+/// 文章全体を変換した候補の既定の件数 (azooKey と同じ)
+pub const DEFAULT_FULL_COUNT: usize = 5;
+
+/// `processResult`。`full_count` は文章全体の候補の上限 (azooKey は `DEFAULT_FULL_COUNT`)。
+pub fn process(dict: &Dictionary, lattice: &Lattice, reading_katakana: &str, full_count: usize) -> Converted {
     let clause_result = lattice.candidate_data();
     let empty_seen: HashSet<String> = HashSet::new();
     if clause_result.is_empty() {
@@ -287,9 +290,9 @@ pub fn process(dict: &Dictionary, lattice: &Lattice, reading_katakana: &str) -> 
         return Converted { main: candidates.clone(), first_clause: candidates };
     }
 
-    // 文章全体を変換した場合の候補上位 5 件
+    // 文章全体を変換した場合の候補上位 `full_count` 件
     let whole_sentence_unique = get_unique(clause_result.iter().map(|d| process_clause_candidate(dict, d)), &empty_seen);
-    let full_candidates = min_count(whole_sentence_unique.clone(), 5, by_value_desc);
+    let full_candidates = min_count(whole_sentence_unique.clone(), full_count, by_value_desc);
 
     // 文節のみ変換するパターン
     let unique_first_clause = get_unique(clause_result.iter().map(first_clause_candidate), &empty_seen);
@@ -522,9 +525,9 @@ mod tests {
         let dict = Dictionary::open_default().unwrap();
         // ノードが無い (EOS に繋がらない) ラティス
         let mut cache = super::super::lattice::LookupCache::new();
-        let mut l = Lattice::build(&dict, &mut cache, &super::super::lattice::ExtraWords::default(), &[]);
+        let mut l = Lattice::build(&dict, &mut cache, &super::super::lattice::ExtraWords::default(), &[], &mut super::super::lattice::Scratch::default());
         l.run(&dict, 9, None);
-        let r = process(&dict, &l, "キョウ");
+        let r = process(&dict, &l, "キョウ", DEFAULT_FULL_COUNT);
         let texts: Vec<&str> = r.main.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, vec!["キョウ", "きょう"]);
     }
