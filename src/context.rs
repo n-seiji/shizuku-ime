@@ -145,6 +145,13 @@ pub fn ends_ascii(context: &str) -> bool {
     current_line(context).trim_end().chars().next_back().is_some_and(|c| c.is_ascii() && !c.is_ascii_control())
 }
 
+/// 今の行の末尾に続く ASCII 数字の並び (空白は飛ばさない: `"11 "` は空)。
+pub fn trailing_digits(context: &str) -> &str {
+    let line = current_line(context);
+    let head = line.trim_end_matches(|c: char| c.is_ascii_digit());
+    &line[head.len()..]
+}
+
 /// 文脈の今の行が空白だけか (行の頭、またはインデントだけ)。
 pub fn at_line_start(context: &str) -> bool {
     current_line(context).trim().is_empty()
@@ -153,6 +160,18 @@ pub fn at_line_start(context: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 今の行の末尾の数字だけを返す() {
+        assert_eq!(trailing_digits("11"), "11");
+        assert_eq!(trailing_digits("/goal 11"), "11");
+        assert_eq!(trailing_digits("テスト11"), "11");
+        assert_eq!(trailing_digits("11 "), "");
+        assert_eq!(trailing_digits("11\n"), "");
+        assert_eq!(trailing_digits("1\n22"), "22");
+        assert_eq!(trailing_digits(""), "");
+        assert_eq!(trailing_digits("abc"), "");
+    }
 
     #[test]
     fn 追記した文字列を返し_知らないアプリは空() {

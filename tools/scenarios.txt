@@ -298,7 +298,7 @@ zz<enter>	zz
 kyou1<enter>	きょう1
 kyou1<space><enter>	今日1
 kyou1gatsu<space><enter>	今日1ガツ
-2024nen<space><enter>	2024念
+2024nen<space><enter>	2024年
 2024nen<space><up><enter>	2024nen
 sen<space><enter>	戦
 iti<space><enter>	一
@@ -769,3 +769,4 @@ ribe-suwosuru<space><enter>	リベースをする
 monorepo<space><enter>	モノレポ
 dekore-ta<space><enter>	デコレータ
 sanitaizusuru<space><enter>	サニタイズする
+11gatsuha<space><enter>	11月は
