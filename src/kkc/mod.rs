@@ -129,10 +129,11 @@ impl KkcCore {
 
     /// 読み全体を変換する。結果の全件 (`mainResults` / `firstClauseResults`)。毎回ラティスを作り直す。
     pub fn convert_all(&self, reading: &str) -> Converted {
-        self.convert_all_open_tail(reading, None)
+        self.convert_all_open_tail(reading, None, None)
     }
 
-    pub fn convert_all_open_tail(&self, reading: &str, open_from: Option<usize>) -> Converted {
+    /// `left` は直前に確定した語の右の連接 ID。None なら文頭 (BOS) から始める (`convert_all` と同じ)。
+    pub fn convert_all_open_tail(&self, reading: &str, open_from: Option<usize>, left: Option<elem::Rcid>) -> Converted {
         if reading.is_empty() {
             return Converted::default();
         }
@@ -140,6 +141,9 @@ impl KkcCore {
         let chars: Vec<char> = katakana.chars().collect();
         let mut scratch = self.scratch.borrow_mut();
         let mut lat = lattice::Lattice::build(&self.dict, &mut self.cache.borrow_mut(), &self.extra, &chars, &mut scratch);
+        if let Some(left) = left {
+            lat.start_after(left);
+        }
         lat.run(&self.dict, self.limits.n_best, open_from);
         let converted = result::process(&self.dict, &lat, &katakana, self.limits.full_for(chars.len()));
         lat.recycle(&mut scratch);
@@ -234,16 +238,18 @@ pub struct RustEngine {
     english_app: bool,
     /// 直近の変換の revision と、返した候補ごとの `Candidate.data`。`words` が読む。
     last: Option<(u64, Vec<Vec<Rc<elem::Elem>>>)>,
+    /// 文脈の最後の語の右の連接 ID。変換の左端に置く。メモリ上だけで、ログにも書かない。
+    tail: Option<elem::Rcid>,
 }
 
 impl RustEngine {
     pub fn new() -> Self {
-        Self { core: shared_core(), judge: crate::judge::rerank, compare: crate::judge::margin, context: String::new(), english_app: false, last: None }
+        Self { core: shared_core(), judge: crate::judge::rerank, compare: crate::judge::margin, context: String::new(), english_app: false, last: None, tail: None }
     }
 
     #[cfg(test)]
     pub fn with_core(core: Rc<KkcCore>) -> Self {
-        Self { core: Some(core), judge: crate::judge::rerank, compare: crate::judge::margin, context: String::new(), english_app: false, last: None }
+        Self { core: Some(core), judge: crate::judge::rerank, compare: crate::judge::margin, context: String::new(), english_app: false, last: None, tail: None }
     }
 
     /// 審判を差し替える (テスト用。実際の並べ替え経路を fake で通す)。
@@ -271,7 +277,8 @@ fn is_permutation(order: &[usize], n: usize) -> bool {
 /// 先頭の `top` (打ち切り済み) は動かさない。スコアは元の候補から `PENALTY` 引く。審判がなければ元の全文候補の後ろに並ぶ。
 /// 読みが 〜なそう (+ 短い続き) で終わるときは、〜ない を変換して ない を なそう に替えた候補も足す (`nasou_candidates`)。
 /// 戻り値は 〜なそう の動詞形 (すでにあるものも含む) の表記を、最優先の順に並べたもの (`promote_derived` が使う)。
-fn add_variants(core: &KkcCore, top: &mut Vec<result::Cand>, katakana: &str, trailing_punct: &str) -> Vec<String> {
+/// `left` は全文候補と同じ左端。ない 変換のスコアが全文候補と同じ物差しで並ぶように、同じ連接 ID から変換する。
+fn add_variants(core: &KkcCore, top: &mut Vec<result::Cand>, katakana: &str, trailing_punct: &str, left: Option<elem::Rcid>) -> Vec<String> {
     let full: Vec<usize> = (0..top.len()).filter(|&i| top[i].source == result::Source::Full).collect();
     let Some(&last_full) = full.last() else {
         return Vec::new();
@@ -287,7 +294,7 @@ fn add_variants(core: &KkcCore, top: &mut Vec<result::Cand>, katakana: &str, tra
         })
         .collect();
     exclude.extend(cands.iter().map(|c| c.text.replace('\u{1F}', "")));
-    let (added, preferred) = nasou_candidates(core, katakana, trailing_punct, &exclude);
+    let (added, preferred) = nasou_candidates(core, katakana, trailing_punct, &exclude, left);
     cands.extend(added);
     top.splice(last_full + 1..last_full + 1, cands);
     preferred
@@ -297,7 +304,7 @@ fn add_variants(core: &KkcCore, top: &mut Vec<result::Cand>, katakana: &str, tra
 /// 辞書は 翁 (おきな) が 起き+な より強く、おきなそう の候補に 起きなそう が出ないため。エンジンの順位は変えず、審判が他の全文候補と並べる。
 /// 該当する読みのときだけ余分に 1 回変換する。`MAX_VARIANTS` とは別枠なので他の派生に押し出されない。
 /// 戻り値の 2 つ目は、動詞形の表記を ない 変換の順に並べたもの。`exclude` にある (エンジンがすでに出している) ものも含む。
-fn nasou_candidates(core: &KkcCore, katakana: &str, trailing_punct: &str, exclude: &HashSet<String>) -> (Vec<result::Cand>, Vec<String>) {
+fn nasou_candidates(core: &KkcCore, katakana: &str, trailing_punct: &str, exclude: &HashSet<String>, left: Option<elem::Rcid>) -> (Vec<result::Cand>, Vec<String>) {
     let Some((negative, tail)) = katakana.strip_suffix(trailing_punct).and_then(variants::nasou_split) else {
         return (Vec::new(), Vec::new());
     };
@@ -305,7 +312,7 @@ fn nasou_candidates(core: &KkcCore, katakana: &str, trailing_punct: &str, exclud
         return (Vec::new(), Vec::new());
     };
     let exclude: HashSet<String> = exclude.iter().filter_map(|t| t.strip_suffix(trailing_punct)).map(str::to_string).collect();
-    let converted = core.convert_all(&negative);
+    let converted = core.convert_all_open_tail(&negative, None, left);
     let alt: Vec<(f32, &[Rc<elem::Elem>])> = converted
         .main
         .iter()
@@ -428,10 +435,11 @@ impl Default for RustEngine {
     }
 }
 
-impl CandidateEngine for RustEngine {
+impl RustEngine {
     /// 全文候補 (Full) だけを審判で並べ替え、それぞれ元の枠に入れ直す。審判が使えなければ engine の順。
     /// `last` も同じ並びで持つので、添字と語の情報はずれない。
-    fn convert(&mut self, revision: u64, hiragana: &str) -> Vec<String> {
+    /// `tail` は読みの左隣の語の右の連接 ID。None なら文頭から変換する。
+    fn convert_from(&mut self, revision: u64, hiragana: &str, tail: Option<elem::Rcid>) -> Vec<String> {
         let Some(core) = &self.core else {
             return Vec::new();
         };
@@ -441,19 +449,21 @@ impl CandidateEngine for RustEngine {
         let body = body_before_punct(hiragana);
         let open_from = body.map(|b| b.chars().count());
         let digits = crate::context::trailing_digits(&self.context);
+        // 直前の語の連接 ID は、文脈が数字で終わる間は使わない (数字経路が優先で、その外の変換とも揃える)。
+        let left = tail.filter(|_| digits.is_empty());
         let mut converted = None;
         if !digits.is_empty() && hiragana.chars().next().is_some_and(variants::is_kana) {
             // 直前に確定した数字 (同じ行) は読みの前に付けて変換し、候補から外す (11がつは -> 11月は)。
             let prefixed = format!("{digits}{hiragana}");
-            let c = core.convert_all_open_tail(&prefixed, open_from.map(|n| n + digits.chars().count()));
+            let c = core.convert_all_open_tail(&prefixed, open_from.map(|n| n + digits.chars().count()), None);
             converted = Some(strip_digit_prefix(c, digits)).filter(|c| !c.main.is_empty());
         }
         // 数字経路では読みそのまま (がつは / ガツハ) の候補が落ちるので、通常変換の全読み候補を末尾に補う。
-        let plain = if converted.is_some() { Some(core.convert_all_open_tail(hiragana, open_from)) } else { None };
-        let converted = converted.unwrap_or_else(|| core.convert_all_open_tail(hiragana, open_from));
+        let plain = if converted.is_some() { Some(core.convert_all_open_tail(hiragana, open_from, left)) } else { None };
+        let converted = converted.unwrap_or_else(|| core.convert_all_open_tail(hiragana, open_from, left));
         let mut top: Vec<result::Cand> = converted.main[..converted.main.len().min(TOP_N)].to_vec();
         let katakana = dict::to_katakana(hiragana);
-        let preferred = add_variants(core, &mut top, &katakana, body.map_or("", |b| &hiragana[b.len()..]));
+        let preferred = add_variants(core, &mut top, &katakana, body.map_or("", |b| &hiragana[b.len()..]), left);
         let head_len = top.len();
         append_tail(&mut top, &converted.main[converted.main.len().min(TOP_N)..], &katakana);
         if let Some(plain) = &plain {
@@ -474,14 +484,27 @@ impl CandidateEngine for RustEngine {
         self.last = Some((revision, order.iter().map(|&i| top[i].data.clone()).collect()));
         texts
     }
+}
+
+impl CandidateEngine for RustEngine {
+    /// 組成の先頭の読み。直前に確定した語 (`set_context` の連接 ID) の続きとして変換する。
+    fn convert(&mut self, revision: u64, hiragana: &str) -> Vec<String> {
+        self.convert_from(revision, hiragana, self.tail)
+    }
+
+    /// 英単語や固定した語のあとの読み。直前に確定した語の続きではないので、連接 ID を使わず文頭から変換する。
+    fn convert_after_head(&mut self, revision: u64, hiragana: &str) -> Vec<String> {
+        self.convert_from(revision, hiragana, None)
+    }
 
     fn cancel(&mut self) {
         self.last = None;
     }
 
-    fn set_context(&mut self, context: &str, english_app: bool) {
+    fn set_context(&mut self, context: &str, tail: Option<elem::Rcid>, english_app: bool) {
         self.context.clear();
         self.context.push_str(context);
+        self.tail = tail;
         self.english_app = english_app;
     }
 
@@ -522,6 +545,14 @@ impl CandidateEngine for RustEngine {
     fn has_kanji_reading(&self, katakana: &str, kanji: char) -> bool {
         self.core.as_ref().is_some_and(|core| core.has_kanji_reading(katakana, kanji))
     }
+
+    fn committed_tail(&self, revision: u64, index: usize, committed: &str) -> Option<elem::Rcid> {
+        let (r, candidates) = self.last.as_ref()?;
+        let data = candidates.get(index).filter(|_| *r == revision)?;
+        let surface: String = data.iter().map(|e| e.word.replace('\u{1F}', "")).collect();
+        let last = data.last()?;
+        (!surface.is_empty() && committed.ends_with(&surface)).then_some(elem::Rcid(last.rcid))
+    }
 }
 
 #[cfg(test)]
@@ -530,7 +561,7 @@ mod tests {
 
     fn with_ctx(context: &str, reading: &str) -> (RustEngine, Vec<String>) {
         let mut e = RustEngine::with_core(Rc::new(KkcCore::open().unwrap())).with_judge(no_judge);
-        e.set_context(context, false);
+        e.set_context(context, None, false);
         let c = e.convert(1, reading);
         (e, c)
     }
@@ -706,9 +737,9 @@ mod tests {
         let core = Rc::new(KkcCore::open().unwrap());
         let mut e = RustEngine::with_core(core).with_judge(spy_judge);
         e.convert(1, "かんじ");
-        e.set_context("机の", false);
+        e.set_context("机の", None, false);
         e.convert(2, "かんじ");
-        e.set_context("", false);
+        e.set_context("", None, false);
         e.convert(3, "かんじ");
         assert_eq!(SEEN.with(|s| s.borrow().clone()), ["", "机の", ""]);
     }
@@ -734,7 +765,7 @@ mod tests {
     fn 比べた差が余裕に届いたときだけ英語を選び_審判が使えなければ選ばない() {
         let core = Rc::new(KkcCore::open().unwrap());
         let mut e = RustEngine::with_core(core).with_compare(margin_of_four);
-        e.set_context("claude ", false);
+        e.set_context("claude ", None, false);
         assert!(e.prefers_text("code", "子で"));
         assert_eq!(COMPARED.with(|c| c.borrow().clone()), [("claude ".to_string(), "code".to_string(), "子で".to_string())]);
         e = e.with_compare(margin_below_four);
@@ -749,7 +780,7 @@ mod tests {
         let mut e = RustEngine::with_core(core).with_compare(margin_of_four);
         let before = COMPARED.with(|c| c.borrow().len());
         for context in ["", "机の", "今日は ", "hello\n", "hello\n\n"] {
-            e.set_context(context, false);
+            e.set_context(context, None, false);
             assert!(!e.prefers_text("more", "漏れ"), "{context:?}");
         }
         assert_eq!(COMPARED.with(|c| c.borrow().len()), before);
@@ -760,16 +791,16 @@ mod tests {
         let core = Rc::new(KkcCore::open().unwrap());
         let mut e = RustEngine::with_core(core).with_compare(margin_of_four);
         for context in ["hello\n", "今日は\n", "", "x\n  "] {
-            e.set_context(context, true);
+            e.set_context(context, None, true);
             assert!(e.prefers_text("code", "子で"), "{context:?}");
         }
         let before = COMPARED.with(|c| c.borrow().len());
         for context in ["これは", "今日は ", "x\n機能"] {
-            e.set_context(context, true);
+            e.set_context(context, None, true);
             assert!(!e.prefers_text("more", "漏れ"), "{context:?}");
         }
         assert_eq!(COMPARED.with(|c| c.borrow().len()), before);
-        e.set_context("hello", true);
+        e.set_context("hello", None, true);
         assert!(e.prefers_text("code", "子で"), "ASCII の途中は今まで通り");
     }
 
@@ -944,7 +975,7 @@ mod tests {
             let main = core.convert_all(reading).main;
             let mut top: Vec<result::Cand> = main[..main.len().min(TOP_N)].to_vec();
             let before = top.len();
-            add_variants(&core, &mut top, &dict::to_katakana(reading), "");
+            add_variants(&core, &mut top, &dict::to_katakana(reading), "", None);
             let added = top.len() - before;
             assert!(added <= variants::MAX_VARIANTS, "{reading}: {added}");
         }
@@ -982,7 +1013,7 @@ mod tests {
     fn head_len(core: &Rc<KkcCore>, reading: &str) -> usize {
         let converted = core.convert_all(reading);
         let mut top: Vec<result::Cand> = converted.main[..converted.main.len().min(TOP_N)].to_vec();
-        add_variants(core, &mut top, &dict::to_katakana(reading), "");
+        add_variants(core, &mut top, &dict::to_katakana(reading), "", None);
         top.len()
     }
 
@@ -1312,5 +1343,182 @@ mod tests {
         assert!(first > 0, "変換後に buffer が戻る");
         core.convert_all("かんじ");
         assert!(core.scratch.borrow().capacity() >= first, "短い読みでも縮まない");
+    }
+    /// 受付 (うけつけ) を全文変換した候補の、最後の語の右の連接 ID。
+    fn uketsuke_rcid(core: &KkcCore) -> elem::Rcid {
+        let converted = core.convert_all("うけつけ");
+        let cand = converted
+            .main
+            .iter()
+            .find(|c| c.source == result::Source::Full && c.text.replace('\u{1F}', "") == "受付")
+            .expect("前提: 受付が全文候補にある");
+        elem::Rcid(cand.data.last().expect("語がある").rcid)
+    }
+
+    fn first_full(converted: &Converted) -> String {
+        converted.main.iter().find(|c| c.source == result::Source::Full).map(|c| c.text.replace('\u{1F}', "")).expect("全文候補がある")
+    }
+
+    fn fingerprint(converted: &Converted) -> Vec<(String, u32, &'static str)> {
+        converted.main.iter().map(|c| (c.text.clone(), c.value.to_bits(), c.source.tag())).collect()
+    }
+
+    #[test]
+    fn a_left_id_moves_the_head_ranking_and_none_is_the_plain_conversion() {
+        let core = KkcCore::open().unwrap();
+        let left = uketsuke_rcid(&core);
+        for reading in ["とう", "とうを", "とうをすま", "きょうはいいてんきですね"] {
+            let plain = core.convert_all(reading);
+            assert_eq!(fingerprint(&core.convert_all_open_tail(reading, None, None)), fingerprint(&plain), "{reading}: None は文頭からの変換と同じ (text と value のビットまで)");
+        }
+        let plain = core.convert_all("とう");
+        let seeded = core.convert_all_open_tail("とう", None, Some(left));
+        assert_ne!(first_full(&plain), "等", "前提: 文頭からだと等は先頭にならない");
+        assert_eq!(first_full(&seeded), "等");
+        assert_ne!(fingerprint(&seeded), fingerprint(&plain));
+    }
+
+    fn engine_after(core: &Rc<KkcCore>, tail: Option<elem::Rcid>) -> RustEngine {
+        let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
+        e.set_context("受付", tail, false);
+        e
+    }
+
+    #[test]
+    fn the_left_id_of_the_committed_word_makes_the_suffix_the_first_candidate() {
+        for core in [KkcCore::open().unwrap(), KkcCore::open_with_limits(Limits::IME).unwrap()] {
+            let core = Rc::new(core);
+            let left = Some(uketsuke_rcid(&core));
+            let mut seeded = engine_after(&core, left);
+            assert_eq!(seeded.convert(1, "とう")[0], "等");
+            assert_eq!(seeded.convert(2, "とうを")[0], "等を");
+            let third = seeded.convert(3, "とうをすま");
+            assert!(third[0].starts_with("等を"), "{third:?}");
+            for reading in ["とう", "とうを", "とうをすま"] {
+                let mut bare = RustEngine::with_core(core.clone()).with_judge(no_judge);
+                assert_eq!(engine_after(&core, None).convert(1, reading), bare.convert(1, reading), "{reading}: 連接 ID が無ければ文脈の文字列だけでは変わらない");
+            }
+            assert_ne!(engine_after(&core, None).convert(1, "とう")[0], "等");
+        }
+    }
+
+    #[test]
+    fn digits_before_the_reading_ignore_the_left_id() {
+        let core = Rc::new(KkcCore::open().unwrap());
+        let left = Some(uketsuke_rcid(&core));
+        for reading in ["がつは", "こ"] {
+            let mut with_left = engine_after(&core, left);
+            with_left.set_context("11", left, false);
+            let mut without = engine_after(&core, None);
+            without.set_context("11", None, false);
+            assert_eq!(with_left.convert(1, reading), without.convert(1, reading), "{reading}");
+        }
+    }
+
+    #[test]
+    fn the_nasou_variants_are_scored_from_the_same_left_id_as_the_full_candidates() {
+        let core = KkcCore::open().unwrap();
+        let left = uketsuke_rcid(&core);
+        let katakana = dict::to_katakana("おきなそう");
+        let (plain, _) = nasou_candidates(&core, &katakana, "", &HashSet::new(), None);
+        let (seeded, _) = nasou_candidates(&core, &katakana, "", &HashSet::new(), Some(left));
+        let common = plain.iter().find(|p| seeded.iter().any(|s| s.text == p.text)).expect("前提: 両方に出る候補がある");
+        let with_left = seeded.iter().find(|s| s.text == common.text).unwrap();
+        let head = common.data.first().expect("語がある");
+        let shift = core.dict.cc(left.0, head.lcid) - core.dict.cc(0, head.lcid);
+        assert!(shift.abs() > 0.5, "前提: 連接 ID で先頭の連接コストが動く ({shift})");
+        assert!((with_left.value - common.value - shift).abs() < 1e-3, "{} - {} は {shift}", with_left.value, common.value);
+    }
+
+    #[test]
+    fn committed_tail_is_the_last_words_rcid_only_when_the_candidate_ends_the_committed_text() {
+        let core = Rc::new(KkcCore::open().unwrap());
+        let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
+        let cands = e.convert(1, "かいしゃのけん");
+        let i = index_of(&cands, "会社の件");
+        let want = e.last.as_ref().and_then(|(_, c)| c[i].last()).map(|elem| elem::Rcid(elem.rcid));
+        assert!(want.is_some());
+        assert_eq!(e.committed_tail(1, i, "会社の件"), want);
+        assert_eq!(e.committed_tail(1, i, "今日は会社の件"), want, "候補で終わっていればよい");
+        assert_eq!(e.committed_tail(1, i, "会社の件k"), None, "未確定のローマ字が続く");
+        assert_eq!(e.committed_tail(1, i, "会社の件。"), None, "確定の後ろに文字が続く");
+        assert_eq!(e.committed_tail(1, i, "会社の"), None);
+        assert_eq!(e.committed_tail(1, i, ""), None);
+        assert_eq!(e.committed_tail(2, i, "会社の件"), None, "古い revision");
+        assert_eq!(e.committed_tail(1, 999, "会社の件"), None, "知らない添字");
+        e.cancel();
+        assert_eq!(e.committed_tail(1, i, "会社の件"), None, "cancel のあと");
+    }
+
+    type ComposerOver = crate::composer::Composer<RustEngine, crate::deps::FakeLexicon>;
+
+    fn composer_after(core: &Rc<KkcCore>, tail: Option<elem::Rcid>, live: bool) -> ComposerOver {
+        let lexicon = crate::deps::FakeLexicon::default().with_english_word(|w| w == "artifact");
+        let mut c = ComposerOver::new(engine_after(core, tail), lexicon);
+        c.set_live(live);
+        c
+    }
+
+    fn type_keys(c: &mut ComposerOver, keys: &str) {
+        for ch in keys.chars() {
+            c.type_romaji(&ch.to_string());
+        }
+    }
+
+    #[test]
+    fn a_reading_after_an_english_word_does_not_start_from_the_committed_tail() {
+        let core = Rc::new(KkcCore::open().unwrap());
+        let left = Some(uketsuke_rcid(&core));
+        assert_ne!(engine_after(&core, left).convert(1, "にとう"), engine_after(&core, None).convert(1, "にとう"), "前提: 同じ読みが組成の先頭なら連接 ID で順位が動く");
+        let candidates = |tail| {
+            let mut c = composer_after(&core, tail, false);
+            type_keys(&mut c, "artifactnitou");
+            c.flush_romaji();
+            assert_eq!(c.phase(), crate::composer::Phase::Mixed);
+            assert!(c.begin_conversion());
+            c.candidates().iter().map(|x| x.text.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(candidates(left), candidates(None), "確定");
+        let shown = |tail| {
+            let mut c = composer_after(&core, tail, true);
+            type_keys(&mut c, "artifactnitou");
+            c.preedit()
+        };
+        assert_eq!(shown(left), shown(None), "live の表示");
+    }
+
+    #[test]
+    fn a_reading_after_a_pinned_word_does_not_start_from_the_committed_tail() {
+        let core = Rc::new(KkcCore::open().unwrap());
+        let left = Some(uketsuke_rcid(&core));
+        let first = |tail| engine_after(&core, tail).convert(1, "とう")[0].clone();
+        assert_ne!(first(left), first(None), "前提: 同じ読みが組成の先頭なら連接 ID で先頭が変わる");
+        let after_pin = |tail, more: &str| {
+            let mut c = composer_after(&core, tail, true);
+            type_keys(&mut c, "tounoyoteiwo");
+            assert!(c.backspace());
+            let pinned = c.display().into_owned();
+            type_keys(&mut c, more);
+            let shown = c.display().into_owned();
+            shown.strip_prefix(pinned.as_str()).unwrap_or_else(|| panic!("固定した {pinned} が先頭にない: {shown}")).to_string()
+        };
+        assert_eq!(after_pin(left, "tou"), first(None), "固定したあとは文頭から変換する");
+        for more in ["tou", "touwo", "touwosuma"] {
+            assert_eq!(after_pin(left, more), after_pin(None, more), "{more}");
+        }
+    }
+
+    #[test]
+    fn the_first_reading_of_a_composition_starts_from_the_committed_tail() {
+        let core = Rc::new(KkcCore::open().unwrap());
+        let left = Some(uketsuke_rcid(&core));
+        for live in [false, true] {
+            let mut c = composer_after(&core, left, live);
+            type_keys(&mut c, "touwo");
+            if !live {
+                assert!(c.begin_conversion());
+            }
+            assert_eq!(c.display(), "等を", "live={live}");
+        }
     }
 }

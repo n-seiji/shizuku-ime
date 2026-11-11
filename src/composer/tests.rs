@@ -1,4 +1,5 @@
 use super::*;
+use crate::translit::Form;
 use crate::deps::{EnglishMemory, FakeLexicon};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -354,6 +355,8 @@ struct WordsEngine {
     converted: Rc<RefCell<Vec<String>>>,
     /// `cancel` が呼ばれた回数。
     cancels: Rc<RefCell<usize>>,
+    /// `convert_after_head` に渡された読み (`converted` にも入る)。
+    after_head: Rc<RefCell<Vec<String>>>,
 }
 
 fn pairs(words: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -368,6 +371,9 @@ fn words_table(hiragana: &str) -> Vec<Vec<(String, String)>> {
         "こう" => vec![pairs(&[("後", "コウ")])],
         "くぎをうつ" => vec![pairs(&[("釘", "クギ"), ("を", "ヲ"), ("打つ", "ウツ")])],
         "かいしゃのけん" => vec![pairs(&[("会社", "カイシャ"), ("の件", "ノケン")])],
+        // engine の第 1 候補が読みと同じひらがな。
+        "ここ" => vec![pairs(&[("ここ", "ココ")])],
+        "ぷりんたー" => vec![pairs(&[("プリンター", "プリンター")])],
         // 語列が読みと合わない engine (学習・補正などで組み立てが違う)。
         "ほ" | "ほげ" => vec![pairs(&[("保", "ホホ")])],
         _ => vec![pairs(&[(&format!("変{hiragana}"), &translit::to_katakana(hiragana))])],
@@ -385,6 +391,10 @@ impl CandidateEngine for WordsEngine {
         self.last = Some((revision, table));
         texts
     }
+    fn convert_after_head(&mut self, revision: u64, hiragana: &str) -> Vec<String> {
+        self.after_head.borrow_mut().push(hiragana.to_string());
+        self.convert(revision, hiragana)
+    }
     fn cancel(&mut self) {
         *self.cancels.borrow_mut() += 1;
     }
@@ -395,6 +405,13 @@ impl CandidateEngine for WordsEngine {
     }
     fn has_kanji_reading(&self, katakana: &str, kanji: char) -> bool {
         matches!((katakana, kanji), ("シャ", '社') | ("セイ", '生') | ("ケン", '件'))
+    }
+    /// 候補 `index` の表記が確定の末尾にそのまま現れるときだけ、`Rcid(100 + index)` を返す (候補ごとに ID が違う)。
+    fn committed_tail(&self, revision: u64, index: usize, committed: &str) -> Option<Rcid> {
+        let (r, table) = self.last.as_ref().filter(|_| self.has_words)?;
+        let words = table.get(index).filter(|_| *r == revision)?;
+        let surface: String = words.iter().map(|(surface, _)| surface.as_str()).collect();
+        committed.ends_with(&surface).then_some(Rcid(100 + index))
     }
 }
 
@@ -2385,4 +2402,236 @@ fn engineが後ろに同じ英単語rawを出していても2番目に入り複�
     assert_eq!(c.candidates()[1].source, Source::Raw);
     let ranks: Vec<Option<EngineRank>> = c.candidates().iter().map(|x| x.engine_rank()).collect();
     assert_eq!(ranks, vec![Some(EngineRank(0)), None, Some(EngineRank(1)), Some(EngineRank(2))]);
+}
+
+// 確定の連接 ID (`Committed::tail`): 確定が engine の候補の語で終わるときだけ Some。
+
+fn space_mode_composer() -> WordsComposer {
+    Composer::new(WordsEngine { has_words: true, ..WordsEngine::default() }, FakeLexicon::default())
+}
+
+#[test]
+fn 候補を選んで確定すると_選んだ候補の最後の語の連接idを返す() {
+    let mut c = space_mode_composer();
+    type_sensei(&mut c);
+    assert!(c.begin_conversion());
+    assert_eq!(c.commit().tail, Some(Rcid(100)));
+    type_sensei(&mut c);
+    c.begin_conversion();
+    assert!(c.advance());
+    assert_eq!(c.display(), "戦世以");
+    assert_eq!(c.commit().tail, Some(Rcid(101)), "選んだ候補の添字で引く");
+}
+
+#[test]
+fn live変換中のenterは見えている第1候補の連接idを返す() {
+    let mut c = words_composer();
+    type_sensei(&mut c);
+    assert_eq!(c.commit_preview(), "先生");
+    assert_eq!(c.commit().tail, Some(Rcid(100)));
+}
+
+#[test]
+fn live変換で固定した先頭の後ろの変換で終わる確定は_その最後の語の連接idを返し_固定だけの確定は返さない() {
+    let mut c = pinned_sensei();
+    assert_eq!(c.commit_preview(), "先生");
+    assert_eq!(c.commit().tail, None, "固定した語の ID は持たない");
+    let mut c = pinned_sensei();
+    type_kou(&mut c);
+    assert_eq!(c.commit_preview(), "先生後");
+    assert_eq!(c.commit().tail, Some(Rcid(100)));
+}
+
+#[test]
+fn engineの候補で終わらない確定には連接idを付けない() {
+    let mut c = space_mode_composer();
+    type_sensei(&mut c);
+    assert_eq!(c.commit().tail, None, "変換せずかなのまま確定");
+    type_sensei(&mut c);
+    c.begin_conversion();
+    while c.display() != "sensei" {
+        assert!(c.advance());
+    }
+    let committed = c.commit();
+    assert_eq!((committed.text.as_str(), committed.tail), ("sensei", None), "raw");
+    type_sensei(&mut c);
+    assert!(c.transliterate(Form::Katakana));
+    assert_eq!(c.commit().tail, None, "字種変換");
+}
+
+#[test]
+fn 変換せずかなのまま確定した文字列が_engineの候補と同じ表記でも連接idを付けない() {
+    let mut c = space_mode_composer();
+    type_units(&mut c, &[("ko", "こ"), ("ko", "こ")]);
+    assert_eq!(texts_of(&c), ["ここ"], "前提: engine の第 1 候補が読みと同じ");
+    assert_eq!(c.commit().tail, None, "Space モードで変換せずに確定");
+    let mut c = space_mode_composer();
+    type_units(&mut c, &[("ko", "こ"), ("ko", "こ")]);
+    c.begin_conversion();
+    assert_eq!(c.commit().tail, Some(Rcid(100)), "選んで確定すれば付く");
+}
+
+#[test]
+fn 絵文字と英単語の候補は連接idを返さず_同じ読みのengine候補は返す() {
+    let lexicon = FakeLexicon::default().with_english(loanwords).with_emoji(|reading| if reading == "ライト" { vec!["💡".to_string()] } else { Vec::new() });
+    let mut c = Composer::new(WordsEngine { has_words: true, ..WordsEngine::default() }, lexicon);
+    let pick = |c: &mut WordsComposer, text: &str| {
+        c.push_input("raito", "ライト", "");
+        c.begin_conversion();
+        let index = texts_of(c).iter().position(|t| t == text).unwrap_or_else(|| panic!("{text} が候補にない"));
+        assert!(c.select_candidate(index));
+        c.commit()
+    };
+    assert_eq!(pick(&mut c, "light").tail, None, "英単語");
+    assert_eq!(pick(&mut c, "💡").tail, None, "絵文字");
+    assert_eq!(pick(&mut c, "変ライト").tail, Some(Rcid(100)));
+}
+
+fn texts_of(c: &WordsComposer) -> Vec<String> {
+    c.candidates().iter().map(|x| x.text.clone()).collect()
+}
+
+#[test]
+fn 英字が続く確定と未確定のローマ字が続く確定には連接idを付けない() {
+    let mut c = words_composer();
+    type_sensei(&mut c);
+    c.push_literal("X");
+    assert_eq!(c.commit_preview(), "先生X");
+    assert_eq!(c.commit().tail, None, "かな変換のあとに英字");
+    let mut c = words_composer();
+    type_sensei(&mut c);
+    c.type_romaji("k");
+    assert_eq!(c.commit_preview(), "先生k");
+    assert_eq!(c.commit().tail, None, "未確定のローマ字");
+    let mut c = words_composer();
+    c.push_literal("X");
+    type_sensei(&mut c);
+    assert_eq!(c.commit().tail, None, "英字の区切りがある組成");
+    let mut c = space_mode_composer();
+    c.push_literal("X");
+    type_sensei(&mut c);
+    assert!(c.begin_conversion());
+    assert_eq!(c.display(), "X先生");
+    assert_eq!(c.commit().tail, None, "英字の区切りがある組成の変換候補");
+}
+
+#[test]
+fn 矢印を含む読みの候補は表記が確定の文字列と食い違うので連接idを付けない() {
+    let mut c = space_mode_composer();
+    type_units(&mut c, &[("se", "せ"), ("->", "->")]);
+    assert!(c.begin_conversion());
+    assert_eq!(c.display(), "変せ->", "前提: engine には > で渡し、候補の > を -> に戻す");
+    assert_eq!(c.commit().tail, None);
+}
+
+#[test]
+fn engineが語を持たないと連接idは返さない() {
+    let mut c = Composer::new(WordsEngine::default(), FakeLexicon::default());
+    type_sensei(&mut c);
+    c.begin_conversion();
+    assert_eq!(c.commit().tail, None);
+}
+
+#[test]
+fn 句読点や括弧で終わる確定には連接idを付けず_語で終わる確定には付ける() {
+    let word_ends: [&[(&str, &str)]; 3] = [
+        &[("se", "せ"), ("n", "ん"), ("se", "せ"), ("i", "い")],
+        &[("se", "せ"), ("n", "ん"), ("se", "せ"), ("i", "い"), ("ha", "は")],
+        &[("pu", "ぷ"), ("ri", "り"), ("n", "ん"), ("ta", "た"), ("-", "ー")],
+    ];
+    let mark_ends = ["。", "、", "？", "！", "」", "』", "・", ")", "1"];
+    for live in [false, true] {
+        let committed = |units: &[(&str, &str)]| {
+            let mut c = if live { words_composer() } else { space_mode_composer() };
+            type_units(&mut c, units);
+            if !live {
+                assert!(c.begin_conversion());
+            }
+            c.commit()
+        };
+        for units in word_ends {
+            let done = committed(units);
+            assert!(done.tail.is_some(), "live={live} {}: 漢字・かな・カタカナ (長音を含む) で終わる確定", done.text);
+        }
+        for mark in mark_ends {
+            let units: Vec<(&str, &str)> = word_ends[0].iter().copied().chain([(".", mark)]).collect();
+            let done = committed(&units);
+            assert!(done.text.ends_with(mark), "前提: 確定は {mark} で終わる ({})", done.text);
+            assert_eq!(done.tail, None, "live={live} {}: 語で終わらない確定は文頭から変換させる", done.text);
+        }
+    }
+}
+
+fn after_head_of(c: &WordsComposer) -> Vec<String> {
+    c.engine.after_head.borrow().clone()
+}
+
+fn converted_of(c: &WordsComposer) -> Vec<String> {
+    c.engine.converted.borrow().clone()
+}
+
+#[test]
+fn 組成の先頭の読みは_convertで変換する() {
+    let mut c = words_composer();
+    type_sensei(&mut c);
+    assert_eq!(after_head_of(&c), Vec::<String>::new());
+    c.push_literal("T");
+    assert_eq!(c.display(), "先生T");
+    assert_eq!(after_head_of(&c), Vec::<String>::new(), "かなのあとの英字は、かな部分が先頭のまま");
+    let mut c = space_mode_composer();
+    type_sensei(&mut c);
+    assert!(c.begin_conversion());
+    assert_eq!(after_head_of(&c), Vec::<String>::new());
+}
+
+#[test]
+fn 英単語のあとの読みは_live表示でも確定でも_convert_after_headで変換する() {
+    let split_composer = |live: bool| {
+        let lexicon = FakeLexicon::default().with_english_word(|w| w == "artifact");
+        let mut c = Composer::new(WordsEngine { has_words: true, ..WordsEngine::default() }, lexicon);
+        c.set_live(live);
+        for ch in "artifactnitou".chars() {
+            c.type_romaji(&ch.to_string());
+        }
+        c
+    };
+    let via_head = |c: &WordsComposer| {
+        let all = |log: Vec<String>| log.iter().filter(|r| *r == "にとう").count();
+        (all(after_head_of(c)), all(converted_of(c)))
+    };
+    let c = split_composer(true);
+    assert_eq!(c.preedit(), "artifact変にとう", "前提: 英語分割が見えている");
+    let (after_head, all) = via_head(&c);
+    assert!(after_head > 0 && after_head == all, "live: {:?} {:?}", after_head_of(&c), converted_of(&c));
+    let mut c = split_composer(false);
+    c.flush_romaji();
+    assert_eq!(c.phase(), Phase::Mixed);
+    let (after_head, all) = via_head(&c);
+    assert!(after_head > 0 && after_head == all, "確定: {:?} {:?}", after_head_of(&c), converted_of(&c));
+}
+
+#[test]
+fn 大文字で始めた英字のあとの読みは_convert_after_headで変換する() {
+    let mut c = space_mode_composer();
+    c.push_literal("X");
+    type_sensei(&mut c);
+    assert!(c.begin_conversion());
+    assert_eq!(c.display(), "X先生");
+    assert_eq!(after_head_of(&c).last().map(String::as_str), Some("せんせい"));
+    assert_eq!(after_head_of(&c), converted_of(&c), "先頭の英字のあとの変換は全部 after_head");
+}
+
+#[test]
+fn 固定した語のあとの残りの読みは_convert_after_headで変換し_固定を外した読み全体は_convertで変換する() {
+    let mut c = pinned_sensei();
+    c.engine.converted.borrow_mut().clear();
+    c.engine.after_head.borrow_mut().clear();
+    type_kou(&mut c);
+    assert_eq!(after_head_of(&c), ["こ", "こう"]);
+    assert_eq!(converted_of(&c), ["こ", "こう"], "残りの変換は全部 after_head");
+    c.engine.converted.borrow_mut().clear();
+    c.engine.after_head.borrow_mut().clear();
+    assert!(c.begin_conversion());
+    assert_eq!(converted_of(&c), ["せんせいこう"], "固定を外すと読み全体が組成の先頭");
+    assert_eq!(after_head_of(&c), Vec::<String>::new());
 }

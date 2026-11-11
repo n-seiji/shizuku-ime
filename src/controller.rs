@@ -12,6 +12,7 @@ use crate::composer::{Composer, Phase};
 use crate::deps::{EnglishMemory, Lexicon, ProdLexicon, ProdMemory};
 use crate::input::Route;
 use crate::keymap::Key;
+use crate::kkc::elem::Rcid;
 use crate::kkc::RustEngine;
 use crate::outbound;
 use crate::session::{ConversionMode, Effect, Gates, Outcome, Session};
@@ -251,18 +252,18 @@ impl<C: TextClient + Clone, P: CandidatePanel, E: Environment, L: Lexicon, M: En
         self.bundle_id(client).filter(|_| gates.learning).map(str::to_string)
     }
 
-    /// このアプリで直前に打った文字列 (覚えていなければ空)と、英語を打つアプリか。同じ `context_app` の門を 1 回だけ通る。
-    fn context_state(&self, client: Option<&C>) -> (String, bool) {
+    /// このアプリで直前に打った文字列 (覚えていなければ空)と、その最後の語の右の連接 ID、英語を打つアプリか。同じ `context_app` の門を 1 回だけ通る。
+    fn context_state(&self, client: Option<&C>) -> (String, Option<Rcid>, bool) {
         self.context_app(client).map_or_else(Default::default, |app| {
             let now = std::time::Instant::now();
-            crate::context::with(|store| (store.get(&app, now).to_string(), store.is_english_app(&app, now)))
+            crate::context::with(|store| (store.get(&app, now).to_string(), store.tail(&app, now), store.is_english_app(&app, now)))
         })
     }
 
-    /// アプリに入った文字列を文脈に足す。
-    fn remember(&self, text: &str, client: Option<&C>) {
+    /// アプリに入った文字列を文脈に足す。`tail` は engine の候補で終わる確定のときだけ Some。
+    fn remember(&self, text: &str, tail: Option<Rcid>, client: Option<&C>) {
         if let Some(app) = self.context_app(client) {
-            crate::context::with(|store| store.record(&app, text, std::time::Instant::now()));
+            crate::context::with(|store| store.record(&app, text, tail, std::time::Instant::now()));
         }
     }
 
@@ -270,21 +271,21 @@ impl<C: TextClient + Clone, P: CandidatePanel, E: Environment, L: Lexicon, M: En
     fn remember_pass_through(&self, key: Key, text: &str, client: &C) {
         let Some(app) = self.context_app(Some(client)) else { return };
         match key {
-            Key::Enter => self.remember("\n", Some(client)),
+            Key::Enter => self.remember("\n", None, Some(client)),
             Key::Backspace => crate::context::with(|store| store.pop(&app)),
             Key::Up | Key::Down | Key::Control | Key::Translit(_) | Key::Escape => {}
-            _ => self.remember(text, Some(client)),
+            _ => self.remember(text, None, Some(client)),
         }
     }
 
     /// session に判断させ、返ってきた Effect を実行する。処理したら true。
     fn dispatch(&self, key: Key, text: &str, client: &C) -> bool {
         let gates = self.gates(Some(client));
-        let (context, english_app) = self.context_state(Some(client));
+        let (context, tail, english_app) = self.context_state(Some(client));
         // session の借用はここで外れる。以降のポート呼び出しは composer を再借用してよい。
         let outcome = {
             let mut session = self.session.borrow_mut();
-            session.set_context(&context, english_app);
+            session.set_context(&context, tail, english_app);
             session.handle(&gates, key, text)
         };
         let Outcome { handled, action, phase, effects } = outcome;
@@ -323,11 +324,11 @@ impl<C: TextClient + Clone, P: CandidatePanel, E: Environment, L: Lexicon, M: En
                         client.set_marked(&text);
                     }
                 }
-                Effect::Insert(text) => {
+                Effect::Insert { text, tail } => {
                     if let Some(client) = client {
                         client.insert(&text);
                     }
-                    self.remember(&text, client);
+                    self.remember(&text, tail, client);
                 }
                 Effect::ShowCandidates { selected } => self.show_candidates(selected),
                 Effect::HideCandidates => self.panel.hide(),
@@ -1036,6 +1037,74 @@ mod tests {
         assert_eq!(context_of("app.one"), "@");
     }
 
+    fn tail_of(app: &str) -> Option<Rcid> {
+        crate::context::with(|store| store.tail(app, std::time::Instant::now()))
+    }
+
+    /// kyou を変換して Enter で確定する (engine の候補を確定する)。
+    fn commit_converted(f: &Fixture) {
+        type_letters(f, "kyou");
+        assert!(press(f, Key::Space, " "));
+        assert!(press(f, Key::Enter, "\r"));
+    }
+
+    #[test]
+    fn 変換候補を確定すると連接idが文脈に入り_次のキーで変換の左端になる() {
+        let f = fixture();
+        f.1.set_bundle("app.one");
+        commit_converted(&f);
+        let tail = tail_of("app.one");
+        assert!(tail.is_some(), "engine の候補で終わる確定");
+        assert_eq!(f.0.context_state(Some(&f.1)), (context_of("app.one"), tail, false));
+        assert_eq!(tail_of("app.two"), None);
+    }
+
+    #[test]
+    fn 連接idは素通しの文字と改行とバックスペースとかなのままの確定で消える() {
+        let f = fixture();
+        f.1.set_bundle("app.one");
+        commit_converted(&f);
+        assert!(press(&f, Key::Symbol, "@"));
+        assert_eq!(tail_of("app.one"), None, "直接入れた文字");
+        commit_converted(&f);
+        assert!(!press(&f, Key::Enter, "\r"));
+        assert_eq!(tail_of("app.one"), None, "素通しの改行");
+        commit_converted(&f);
+        assert!(!press(&f, Key::Backspace, "\u{7f}"));
+        assert_eq!(tail_of("app.one"), None, "素通しの Backspace");
+        commit_converted(&f);
+        assert!(tail_of("app.one").is_some());
+        type_letters(&f, "a");
+        assert!(press(&f, Key::Enter, "\r"));
+        assert_eq!(tail_of("app.one"), None, "変換せずにかなのまま確定");
+        commit_converted(&f);
+        assert!(!f.0.on_key(Route::PassThrough, f.1.clone()));
+        assert!(!press(&f, Key::Up, ""));
+        assert!(tail_of("app.one").is_some(), "ショートカットとカーソル移動では捨てない");
+    }
+
+    #[test]
+    fn 学習が許されないアプリでは連接idも覚えず使わない() {
+        let f = fixture();
+        f.1.set_bundle("com.1password.1password");
+        commit_converted(&f);
+        assert_eq!(tail_of("com.1password.1password"), None);
+        assert_eq!(f.0.context_state(Some(&f.1)), (String::new(), None, false));
+        let g = fixture();
+        commit_converted(&g);
+        assert!(crate::context::with(|store| store.is_empty()), "bundle id が取れなければ誰の文脈にも入らない");
+        let (c, client, _panel, env) = rec_fixture();
+        client.set_bundle(Some("app.secure"));
+        for ch in "kyou".chars() {
+            rec_press(&c, &client, Key::Letter { upper: false }, &ch.to_string());
+        }
+        rec_press(&c, &client, Key::Space, " ");
+        rec_press(&c, &client, Key::Enter, "\r");
+        assert!(tail_of("app.secure").is_some());
+        env.secure.set(true);
+        assert_eq!(c.context_state(Some(&client)), (String::new(), None, false), "セキュア入力中は連接 ID も使わない");
+    }
+
     #[test]
     fn commit_composition_のあとも文脈は残る() {
         let f = fixture();
@@ -1110,7 +1179,7 @@ mod tests {
             commit_hello(&f);
         }
         assert!(english_app_of("app.eng"));
-        assert!(f.0.context_state(Some(&f.1)).1);
+        assert!(f.0.context_state(Some(&f.1)).2);
         assert!(!english_app_of("app.other"));
         for _ in 0..12 {
             type_letters(&f, "a");
@@ -1129,7 +1198,7 @@ mod tests {
         }
         env.secure.set(false);
         assert!(!english_app_of("app.vote"));
-        assert!(!c.context_state(Some(&client)).1);
+        assert!(!c.context_state(Some(&client)).2);
         client.set_bundle(Some("com.1password.1password"));
         for _ in 0..12 {
             rec_press(&c, &client, Key::Letter { upper: false }, "a");
