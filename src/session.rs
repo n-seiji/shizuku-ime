@@ -6,11 +6,13 @@
 use crate::composer::{CandidateEngine, Committed, Composer, Phase};
 use crate::deps::{EnglishMemory, Lexicon};
 use crate::keymap::{self, Action, Key};
+use crate::kkc::elem::Rcid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     SetMarked(String),
-    Insert(String),
+    /// アプリへ入れる文字列。`tail` は、確定した engine の候補の最後の語の右の連接 ID (それ以外の挿入は None)。文脈に覚える。
+    Insert { text: String, tail: Option<Rcid> },
     /// 候補ウィンドウを出し、選択中の行 (0 起点) をハイライトする。
     ShowCandidates { selected: usize },
     HideCandidates,
@@ -49,6 +51,9 @@ pub struct Session<E: CandidateEngine, L: Lexicon, M: EnglishMemory> {
     memory: M,
     /// アプリで直前に打った文字列の今の行の末尾が ASCII か (`set_context` が更新する)。
     after_ascii: bool,
+    /// 直近の `set_context` の文脈と、英語を打つアプリか。確定してすぐ次の組成を始めるキーで、engine の文脈を確定の分だけ進めるのに使う。
+    context: String,
+    english_app: bool,
     /// 直前に打った文字が `<` か (`<-` の `-` を長音にしないため)。
     after_lt: bool,
     /// このセッションが最後に処理したキーが、`<` の直接挿入だったか。
@@ -65,16 +70,21 @@ impl<E: CandidateEngine, L: Lexicon, M: EnglishMemory> Session<E, L, M> {
             composer,
             memory,
             after_ascii: false,
+            context: String::new(),
+            english_app: false,
             after_lt: false,
             last_key_was_lt: false,
         }
     }
 
-    /// アプリで直前に打った文字列 (空なら文脈なし)。キーごとに、処理の前に渡す。
+    /// アプリで直前に打った文字列 (空なら文脈なし)と、その最後の語の右の連接 ID (`tail`。無ければ文頭から変換する)。キーごとに、処理の前に渡す。
     /// `english_app` はそのアプリが英語を打つアプリか。true なら、審判は行頭 (空の行・インデントだけ) でも英語の語を聞く。
     /// 変換の文脈になり、今の行 (最後の改行より後ろ) の末尾が ASCII なら組成の先頭の記号を半角のまま入れる。
-    pub fn set_context(&mut self, context: &str, english_app: bool) {
-        self.composer.engine_mut().set_context(context, english_app);
+    pub fn set_context(&mut self, context: &str, tail: Option<Rcid>, english_app: bool) {
+        self.composer.engine_mut().set_context(context, tail, english_app);
+        self.context.clear();
+        self.context.push_str(context);
+        self.english_app = english_app;
         self.after_ascii = crate::context::ends_ascii(context);
         self.after_lt = context.ends_with('<');
     }
@@ -166,12 +176,12 @@ impl<E: CandidateEngine, L: Lexicon, M: EnglishMemory> Session<E, L, M> {
         }
         let phase = self.phase();
         if phase == Phase::Empty && self.after_ascii && matches!(key, Key::Punct | Key::Mark) && text.len() == 1 && HALF_WIDTH_AFTER_ASCII.contains(text) {
-            fx.push(Effect::Insert(text.to_string()));
+            fx.push(Effect::Insert { text: text.to_string(), tail: None });
             return Outcome { handled: true, action: Some(Action::InsertDirect), phase, effects: fx };
         }
         // `<` を打った直後の `-` は長音にせず半角のまま入れる (`<-`)。
         if phase == Phase::Empty && after_lt && key == Key::Hyphen {
-            fx.push(Effect::Insert(text.to_string()));
+            fx.push(Effect::Insert { text: text.to_string(), tail: None });
             return Outcome { handled: true, action: Some(Action::InsertDirect), phase, effects: fx };
         }
         // 数字を含む開発用語 (md5) は、数字で組成を区切らない (区切ると Enter が素通しの改行になる)。
@@ -186,7 +196,13 @@ impl<E: CandidateEngine, L: Lexicon, M: EnglishMemory> Session<E, L, M> {
             }
         };
         if action == Action::CommitThenRestart {
-            self.commit_and_insert(gates, "", &mut fx);
+            let (committed, tail) = self.commit_and_insert(gates, "", &mut fx);
+            // 続きのキーは確定した文字列の右で打たれる。Controller が文脈を渡し直すのは次のキーからなので、ここで進める (文脈を覚えてよいときだけ)。
+            if gates.learning {
+                let context = format!("{}{committed}", self.context);
+                let english_app = self.english_app;
+                self.composer.engine_mut().set_context(&context, tail, english_app);
+            }
             let restarted = self.handle(gates, key, text);
             fx.extend(restarted.effects);
             return Outcome { handled: restarted.handled, action: Some(action), phase, effects: fx };
@@ -210,7 +226,8 @@ impl<E: CandidateEngine, L: Lexicon, M: EnglishMemory> Session<E, L, M> {
         self.composer.flush_romaji_for_commit();
         if !self.composer.is_empty() {
             // フォーカス喪失などによる確定は、英語を「選んだ」のではないので、選択による学習はしない。
-            fx.push(Effect::Insert(self.commit(gates, false)));
+            let (text, tail) = self.commit(gates, false);
+            fx.push(Effect::Insert { text, tail });
         }
         fx.push(Effect::HideCandidates);
         fx
@@ -218,27 +235,32 @@ impl<E: CandidateEngine, L: Lexicon, M: EnglishMemory> Session<E, L, M> {
 
     /// 確定して、学習してよければ英語の語を覚える。学習の可否を判定するのはここだけ。engine の保留は常に取り消す。
     /// chosen は、利用者が確定を選んだ (commitComposition ではない) とき true。候補から選んだ英字はそのときだけ学習する。
-    fn commit(&mut self, gates: &Gates, chosen: bool) -> String {
-        let Committed { text, english, picked } = self.composer.commit();
+    /// 戻り値は確定した文字列と、その最後の語の右の連接 ID。
+    fn commit(&mut self, gates: &Gates, chosen: bool) -> (String, Option<Rcid>) {
+        let Committed { text, english, picked, tail } = self.composer.commit();
         self.composer.engine_mut().cancel();
         if gates.learning {
             for word in english.iter().chain(picked.iter().filter(|_| chosen)) {
                 self.memory.learn(word);
             }
         }
-        text
+        (text, tail)
     }
 
     fn refresh_marked(&self, fx: &mut Vec<Effect>) {
         fx.push(Effect::SetMarked(self.marked_text()));
     }
 
-    /// 現在の表示内容を確定して挿入する。suffix は確定直後に続けて入れる文字列。
-    fn commit_and_insert(&mut self, gates: &Gates, suffix: &str, fx: &mut Vec<Effect>) {
-        let text = self.commit(gates, true);
+    /// 現在の表示内容を確定して挿入する。suffix は確定直後に続けて入れる文字列 (続けると文字列は engine の候補で終わらないので、連接 ID は覚えない)。
+    /// 戻り値は挿入した文字列と、覚えた連接 ID。
+    fn commit_and_insert(&mut self, gates: &Gates, suffix: &str, fx: &mut Vec<Effect>) -> (String, Option<Rcid>) {
+        let (text, tail) = self.commit(gates, true);
+        let text = format!("{text}{suffix}");
+        let tail = tail.filter(|_| suffix.is_empty());
         fx.push(Effect::SetMarked(String::new()));
-        fx.push(Effect::Insert(format!("{text}{suffix}")));
+        fx.push(Effect::Insert { text: text.clone(), tail });
         fx.push(Effect::HideCandidates);
+        (text, tail)
     }
 
     /// 入力途中の表示を更新して候補ウィンドウを閉じる。
@@ -301,11 +323,11 @@ impl<E: CandidateEngine, L: Lexicon, M: EnglishMemory> Session<E, L, M> {
         match action {
             Action::PassThrough => false,
             Action::InsertSpace => {
-                fx.push(Effect::Insert(" ".to_string()));
+                fx.push(Effect::Insert { text: " ".to_string(), tail: None });
                 true
             }
             Action::InsertDirect => {
-                fx.push(Effect::Insert(text.to_string()));
+                fx.push(Effect::Insert { text: text.to_string(), tail: None });
                 true
             }
             Action::TypeRomaji => {
@@ -398,7 +420,7 @@ mod tests {
         for ch in keys.chars().chain(['\r']) {
             let outcome = session.handle(&ALLOW, classify(ch), &ch.to_string());
             for effect in outcome.effects {
-                if let Effect::Insert(text) = effect {
+                if let Effect::Insert { text, .. } = effect {
                     out.push_str(&text);
                 }
             }
@@ -419,7 +441,7 @@ mod tests {
         let mut out = String::new();
         for ch in keys.chars().chain(['\r']) {
             for effect in session.handle(&ALLOW, classify(ch), &ch.to_string()).effects {
-                if let Effect::Insert(text) = effect {
+                if let Effect::Insert { text, .. } = effect {
                     out.push_str(&text);
                 }
             }
@@ -437,7 +459,7 @@ mod tests {
         let mut out = String::new();
         for ch in "md5\r".chars() {
             for effect in session.handle(&ALLOW, classify(ch), &ch.to_string()).effects {
-                if let Effect::Insert(text) = effect {
+                if let Effect::Insert { text, .. } = effect {
                     out.push_str(&text);
                 }
             }
@@ -577,7 +599,7 @@ mod tests {
             for effect in outcome.effects {
                 match effect {
                     Effect::SetMarked(text) => marked = text,
-                    Effect::Insert(text) => committed.push_str(&text),
+                    Effect::Insert { text, .. } => committed.push_str(&text),
                     _ => {}
                 }
             }
@@ -635,6 +657,74 @@ mod tests {
             .collect()
     }
 
+    /// 候補の表記が確定の末尾に現れるとき `Rcid(7 + 添字)` を返す engine。`cancel` で候補を捨てるので、確定の ID は取り消しの前に読む必要がある。
+    #[derive(Default)]
+    struct TailEngine {
+        last: Vec<String>,
+        seen_tail: Option<Rcid>,
+    }
+    impl CandidateEngine for TailEngine {
+        fn convert(&mut self, _: u64, hiragana: &str) -> Vec<String> {
+            self.last = vec![hiragana.to_string(), "字".to_string()];
+            self.last.clone()
+        }
+        fn cancel(&mut self) {
+            self.last.clear();
+        }
+        fn set_context(&mut self, _context: &str, tail: Option<Rcid>, _english_app: bool) {
+            self.seen_tail = tail;
+        }
+        fn committed_tail(&self, _revision: u64, index: usize, committed: &str) -> Option<Rcid> {
+            self.last.get(index).filter(|text| committed.ends_with(text.as_str())).map(|_| Rcid(7 + index))
+        }
+    }
+
+    fn tail_session() -> Session<TailEngine, FakeLexicon, FakeMemory> {
+        Session::new(Composer::new(TailEngine::default(), FakeLexicon::default()), FakeMemory::default(), ConversionMode::Space)
+    }
+
+    fn inserts(fx: &[Effect]) -> Vec<(&str, Option<Rcid>)> {
+        fx.iter().filter_map(|e| if let Effect::Insert { text, tail } = e { Some((text.as_str(), *tail)) } else { None }).collect()
+    }
+
+    fn keys_of(session: &mut Session<TailEngine, FakeLexicon, FakeMemory>, keys: &str) -> Vec<Effect> {
+        keys.chars().flat_map(|ch| session.handle(&ALLOW, classify(ch), &ch.to_string()).effects).collect()
+    }
+
+    #[test]
+    fn engineの候補を確定した挿入は最後の語の連接idを持ち_素通しの挿入は持たない() {
+        let mut session = tail_session();
+        assert_eq!(inserts(&keys_of(&mut session, "kyou \r")), [("きょう", Some(Rcid(7)))]);
+        assert_eq!(inserts(&keys_of(&mut session, "kyou  \r")), [("字", Some(Rcid(8)))], "選んだ候補の添字で引く");
+        assert_eq!(inserts(&keys_of(&mut session, " ")), [(" ", None)], "空白の素通し");
+        assert_eq!(inserts(&keys_of(&mut session, "@")), [("@", None)], "記号の直接入力");
+        assert_eq!(inserts(&keys_of(&mut session, "kyou\r")), [("きょう", None)], "変換せずに確定");
+    }
+
+    #[test]
+    fn 確定の直後に文字を続けて入れるときと_commit_compositionでの連接idの扱い() {
+        let mut session = tail_session();
+        keys_of(&mut session, "kyou ");
+        let mut fx = Vec::new();
+        session.commit_and_insert(&ALLOW, "。", &mut fx);
+        assert_eq!(inserts(&fx), [("きょう。", None)], "続く文字があると文字列は候補で終わらない");
+        keys_of(&mut session, "kyou ");
+        let mut fx = Vec::new();
+        session.commit_and_insert(&ALLOW, "", &mut fx);
+        assert_eq!(inserts(&fx), [("きょう", Some(Rcid(7)))]);
+        keys_of(&mut session, "kyou ");
+        assert_eq!(inserts(&session.commit_composition(&ALLOW)), [("きょう", Some(Rcid(7)))]);
+    }
+
+    #[test]
+    fn set_contextは連接idをengineに渡す() {
+        let mut session = tail_session();
+        session.set_context("受付", Some(Rcid(1283)), false);
+        assert_eq!(session.composer.engine_mut().seen_tail, Some(Rcid(1283)));
+        session.set_context("", None, false);
+        assert_eq!(session.composer.engine_mut().seen_tail, None);
+    }
+
     #[test]
     fn 作った時のモードを返し_set_liveで組成中の表示が作り直される() {
         let mut session = Session::new(Composer::new(TwoEngine, FakeLexicon::default()), FakeMemory::default(), ConversionMode::Live);
@@ -690,7 +780,7 @@ mod tests {
             };
             rest = &rest[len..];
             for effect in session.handle(&ALLOW, key, &text).effects {
-                if let Effect::Insert(text) = effect {
+                if let Effect::Insert { text, .. } = effect {
                     committed.push_str(&text);
                 }
             }
@@ -772,7 +862,7 @@ mod tests {
         let (_, mut committed) = drive(&mut s, keys);
         let enter = s.handle(&ALLOW, Key::Enter, "\r");
         for effect in enter.effects {
-            if let Effect::Insert(text) = effect {
+            if let Effect::Insert { text, .. } = effect {
                 committed.push_str(&text);
             }
         }
@@ -1009,14 +1099,14 @@ mod tests {
     }
 
     fn inserted(outcome: &Outcome) -> Vec<&str> {
-        outcome.effects.iter().filter_map(|e| if let Effect::Insert(t) = e { Some(t.as_str()) } else { None }).collect()
+        outcome.effects.iter().filter_map(|e| if let Effect::Insert { text: t, .. } = e { Some(t.as_str()) } else { None }).collect()
     }
 
     #[test]
     fn 直前が_ascii_なら組成の先頭の記号を半角のまま入れる() {
         for ch in "!?(){}.,:;".chars() {
             let mut session = Session::new(Composer::new(NullEngine, FakeLexicon::default()), FakeMemory::default(), ConversionMode::Space);
-            session.set_context("hello", false);
+            session.set_context("hello", None, false);
             let outcome = session.handle(&ALLOW, classify(ch), &ch.to_string());
             assert!(outcome.handled, "{ch}");
             assert_eq!(inserted(&outcome), [ch.to_string()], "{ch}");
@@ -1028,7 +1118,7 @@ mod tests {
     fn 文脈が無いか日本語で終わるときは記号を今までどおり全角にする() {
         for context in ["", "   ", "今日は", "hello。"] {
             let mut session = Session::new(Composer::new(NullEngine, FakeLexicon::default()), FakeMemory::default(), ConversionMode::Space);
-            session.set_context(context, false);
+            session.set_context(context, None, false);
             let outcome = session.handle(&ALLOW, classify('!'), "!");
             assert!(inserted(&outcome).is_empty(), "{context:?}");
             assert_eq!(session.marked_text(), "！", "{context:?}");
@@ -1039,7 +1129,7 @@ mod tests {
     fn 直前が_ascii_でも_括弧とハイフンなどは日本語のまま() {
         for (ch, want) in [('[', "「"), (']', "」"), ('-', "ー"), ('/', "・"), ('~', "〜")] {
             let mut session = Session::new(Composer::new(NullEngine, FakeLexicon::default()), FakeMemory::default(), ConversionMode::Space);
-            session.set_context("hello", false);
+            session.set_context("hello", None, false);
             session.handle(&ALLOW, classify(ch), &ch.to_string());
             assert_eq!(session.marked_text(), want, "{ch}");
         }
@@ -1048,7 +1138,7 @@ mod tests {
     #[test]
     fn 組成の途中の記号は文脈に関わらず今までどおり() {
         let mut session = Session::new(Composer::new(NullEngine, FakeLexicon::default()), FakeMemory::default(), ConversionMode::Space);
-        session.set_context("hello", false);
+        session.set_context("hello", None, false);
         session.handle(&ALLOW, classify('a'), "a");
         session.handle(&ALLOW, classify('!'), "!");
         assert_eq!(session.marked_text(), "あ！");
@@ -1068,7 +1158,7 @@ mod tests {
     fn lt_の直後のハイフンは長音にしない() {
         let mut session = Session::new(Composer::new(NullEngine, FakeLexicon::default()), FakeMemory::default(), ConversionMode::Space);
         session.handle(&ALLOW, classify('<'), "<");
-        session.set_context("<", false);
+        session.set_context("<", None, false);
         let outcome = session.handle(&ALLOW, classify('-'), "-");
         assert_eq!(inserted(&outcome), ["-"]);
         assert_eq!(session.marked_text(), "");
@@ -1079,7 +1169,7 @@ mod tests {
         let mut session = Session::new(Composer::new(NullEngine, FakeLexicon::default()), FakeMemory::default(), ConversionMode::Space);
         session.handle(&ALLOW, classify('<'), "<");
         session.forget_last_key();
-        session.set_context("<", false);
+        session.set_context("<", None, false);
         let outcome = session.handle(&ALLOW, classify('-'), "-");
         assert!(inserted(&outcome).is_empty());
         assert_eq!(session.marked_text(), "ー");

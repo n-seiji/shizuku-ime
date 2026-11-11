@@ -771,3 +771,21 @@ monorepo<space><enter>	モノレポ
 dekore-ta<space><enter>	デコレータ
 sanitaizusuru<space><enter>	サニタイズする
 11gatsuha<space><enter>	11月は
+# 直前に確定した変換候補の最後の語の連接 ID を、続けて打つ読みの左端にする (受付 のあとの とう は 塔 ではなく 等。審判があれば とうをすま は 等を済ま)。
+# 素通しの文字・改行・Backspace と、変換せずにかなのまま確定した文字は連接 ID を消すので、そのあとは文頭からの変換のまま。Space の変換中に次の読みを打って暗黙に確定する流れ (uketuke<space>touwo) も同じ。
+# とうをすま は審判なしの engine の順 (等を住ま)。審判があると 等を済ま が先頭。
+uketuke<space><enter>tou<space><enter>	受付等
+uketuke<space><enter>touwo<space><enter>	受付等を
+uketuke<space><enter>touwosuma<space><enter>	受付等を住ま
+uketuke<space>touwo<space><enter>	受付等を
+<live>uketuke<enter>touwo<enter>	受付等を
+# 変換中に次の読みを打って暗黙に確定したときも、その 1 打目から左端は確定した語 (明示的に確定した場合と同じ結果)。
+watasi<space><enter>uketuke<space><enter>e<space><enter>	私受付絵
+watasi<space><enter>uketuke<space>e<space><enter>	私受付絵
+uketuke<space><enter>tou<enter>	受付とう
+uketuke<space><enter>@tou<space><enter>	受付@塔
+uketuke<space><enter><space>tou<space><enter>	受付 塔
+uketuke<space><enter><bs>tou<space><enter>	受塔
+uketuke<space><enter><enter>tou<space><enter>	受付\n塔
+uketuke<space><enter>a<enter>tou<space><enter>	受付あ塔
+tou<space><enter>	塔

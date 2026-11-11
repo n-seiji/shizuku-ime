@@ -45,6 +45,11 @@ pub fn canonical_key(s: &str) -> String {
     }
 }
 
+/// 直前の語の右の連接 ID (`Elem::rcid`)。変換の左に置くと、先頭の語は BOS ではなくその語に続くものとして数えられる。
+/// 品詞の分類番号で文字は含まないが、文脈の一部なのでログにもトレースにも出さない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rcid(pub usize);
+
 /// 辞書の 1 要素。`ruby` はカタカナ。
 #[derive(Debug, Clone)]
 pub struct Elem {

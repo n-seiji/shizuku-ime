@@ -6,8 +6,10 @@
 
 use std::borrow::Cow;
 
+use crate::context;
 use crate::deps::Lexicon;
 use crate::english_split;
+use crate::kkc::elem::Rcid;
 use crate::kkc::live_backspace;
 use crate::romaji_converter::RomajiConverter;
 use crate::symbols;
@@ -56,13 +58,20 @@ pub struct Committed {
     /// 候補一覧から英字そのもの (done, the) を選んで確定した語。以後その語を英語で打つ合図 (`Composer::picked_english`)。
     /// `english` と分けるのは、commitComposition (フォーカス喪失など) では「選んだ」とは見なさず学習しないため。
     pub picked: Option<String>,
+    /// 確定した文字列の最後の語の右の連接 ID。確定が engine の候補で終わるときだけ Some (`CandidateEngine::committed_tail`)。
+    pub tail: Option<Rcid>,
 }
 
 pub trait CandidateEngine {
     fn convert(&mut self, revision: u64, hiragana: &str) -> Vec<String>;
+    /// `convert` と同じだが、読みの左に組成の別の部分 (英単語、固定した語) がある。直前に確定した語は読みの左隣ではないので、その連接 ID では始めない。
+    /// 左の語を使わない engine は `convert` のままでよい。
+    fn convert_after_head(&mut self, revision: u64, hiragana: &str) -> Vec<String> {
+        self.convert(revision, hiragana)
+    }
     fn cancel(&mut self);
-    /// 変換の文脈 (アプリで直前に確定した文字列。空なら文脈なし) と、そのアプリが英語を打つアプリか。キーごとに、変換する前に渡される。
-    fn set_context(&mut self, _context: &str, _english_app: bool) {}
+    /// 変換の文脈 (アプリで直前に確定した文字列。空なら文脈なし) と、その最後の語の右の連接 ID (`tail`。無ければ文頭から変換する)、そのアプリが英語を打つアプリか。キーごとに、変換する前に渡される。
+    fn set_context(&mut self, _context: &str, _tail: Option<Rcid>, _english_app: bool) {}
     /// ひらがなの読みがそのまま辞書の見出しにあるか (made → まで)。英単語として切り分ける前の衝突確認に使う。
     fn has_reading(&self, _hiragana: &str) -> bool {
         false
@@ -91,6 +100,11 @@ pub trait CandidateEngine {
     /// カタカナの読みで、表記が漢字 1 字の見出しが辞書にあるか。live 変換の Backspace が読みを切り分けるのに使う。
     fn has_kanji_reading(&self, _katakana: &str, _kanji: char) -> bool {
         false
+    }
+    /// 直近の `convert` の候補 `index` の表記を全部つないだものが `committed` の末尾にそのまま現れるとき、その最後の語の右の連接 ID。
+    /// 語の情報を持たない engine、世代の合わない呼び出し、末尾が違う (英字や未確定のローマ字が続く) 確定は None。
+    fn committed_tail(&self, _revision: u64, _index: usize, _committed: &str) -> Option<Rcid> {
+        None
     }
 }
 
@@ -620,9 +634,14 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
 
     /// 読みの `->` を `>` としてエンジンに渡して変換し、返った候補の同じ位置の `>` を `->` に戻す。
     /// エンジンに `-` を見せないので、学習や順位が矢印のために崩れない。
-    fn convert_with_arrows(&mut self, reading: &str) -> Vec<String> {
+    /// `after_head` は、読みの左に組成の別の部分があるとき (`CandidateEngine::convert_after_head`)。
+    fn convert_with_arrows(&mut self, reading: &str, after_head: bool) -> Vec<String> {
+        let generation = self.reading.generation;
+        let convert = |engine: &mut E, reading: &str| {
+            if after_head { engine.convert_after_head(generation, reading) } else { engine.convert(generation, reading) }
+        };
         if !reading.contains("->") {
-            return self.engine.convert(self.reading.generation, reading);
+            return convert(&mut self.engine, reading);
         }
         let plain = reading.replace("->", ">");
         // 読みの中で、何番目の `>` が矢印だったか。
@@ -632,7 +651,7 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
             arrow_slots.push(at > 0 && rest.as_bytes()[at - 1] == b'-');
             rest = &rest[at + 1..];
         }
-        let mut texts = self.engine.convert(self.reading.generation, &plain);
+        let mut texts = convert(&mut self.engine, &plain);
         for text in &mut texts {
             if text.matches('>').count() != arrow_slots.len() {
                 continue;
@@ -815,9 +834,11 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
     }
 
     /// 英単語 head のあとに、かな tail をエンジンで変換したものを付けた候補列。head が空なら tail の変換結果だけ。
+    /// tail が組成の先頭でない (head がある、先頭が固定されている) ときは、直前に確定した語の続きではないので、文頭から変換する。
     fn convert_mixed(&mut self, head: &str, tail: &str) -> Vec<Candidate> {
+        let after_head = !head.is_empty() || self.pin.is_some();
         let mut list: Vec<Candidate> = Vec::new();
-        for (engine_index, text) in self.convert_with_arrows(tail).into_iter().enumerate() {
+        for (engine_index, text) in self.convert_with_arrows(tail, after_head).into_iter().enumerate() {
             let text = format!("{head}{text}");
             if !list.iter().any(|c| c.text == text) {
                 list.push(Candidate { text, source: Source::Engine(EngineRank(engine_index)) });
@@ -1440,8 +1461,27 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
         }
         english.extend(self.segments.iter().filter(|s| s.is_literal()).map(|s| s.keys().to_string()));
         let picked = self.picked_english();
+        let tail = self.commit_tail(&text);
         self.clear();
-        Committed { text, english, picked }
+        Committed { text, english, picked, tail }
+    }
+
+    /// 確定する文字列 `text` が、見えている engine の候補の語で終わるときの、その最後の語の右の連接 ID。`clear` の前に呼ぶ (読みの世代が進む前に engine へ聞く)。
+    /// 候補は構造で決める (候補選択中のカーソル、live 変換中の第 1 候補)。英字の区切りがある組成と英語分割の表示中は、候補の末尾が確定の末尾とは限らないので None。
+    /// 末尾が一致するかは engine が表記で確かめる (未確定のローマ字や英字が続く確定、直前の変換と別の候補列は None)。
+    /// 確定が語で終わらない (句読点・括弧・記号) ときも None: 次の文や文節は語の続きではなく、文頭から変換する。
+    fn commit_tail(&self, text: &str) -> Option<Rcid> {
+        if !context::ends_with_word(text) || !self.live_split.is_empty() || self.segments.iter().any(Segment::is_literal) {
+            return None;
+        }
+        let rank = match &self.stage {
+            Stage::Selecting(s) => s.list[s.cursor].engine_rank(),
+            Stage::Editing if self.typing == Typing::Kana && self.live_converts(&self.hiragana) => {
+                self.converted_first().and_then(Candidate::engine_rank)
+            }
+            _ => None,
+        }?;
+        self.engine.committed_tail(self.reading.generation, rank.0, text)
     }
 
     /// Session が engine の文脈の設定と取り消しに使う。

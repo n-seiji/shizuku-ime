@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::dict::{Dictionary, CC_MISSING};
-use super::elem::{include_mm_value_calculation, is_clause, Elem, CID_PROPER_NOUN, MID_BOS_EOS, MID_GENERAL};
+use super::elem::{include_mm_value_calculation, is_clause, Elem, Rcid, CID_PROPER_NOUN, MID_BOS_EOS, MID_GENERAL};
 use super::wise::wise_dicdata;
 
 /// 辞書にない語 (開発用語のカタカナ語) を、辞書の語と同じようにラティスへ足すための表。語は読み (カタカナ) と表記が同じ。
@@ -267,6 +267,11 @@ impl Lattice {
             lattice.nodes[idx].prevs.push(0);
         }
         lattice
+    }
+
+    /// 始点の右の連接 ID を `left` に替え、先頭の語の連接コストを BOS からではなく `left` の語からのものにする。mid は BOS のまま。
+    pub fn start_after(&mut self, left: Rcid) {
+        Rc::make_mut(&mut self.nodes[0].elem).rcid = left.0;
     }
 
     pub fn nodes_at(&self, start: usize) -> &[Node] {
@@ -571,6 +576,26 @@ mod tests {
         l.run(&dict, 9, None);
         let expect = 0.0 + -5.0 + dict.cc(0, 1288);
         assert_eq!(l.regs[l.eos[0] as usize].total.to_bits(), expect.to_bits());
+    }
+
+    #[test]
+    fn start_after_replaces_only_the_connection_cost_from_the_start() {
+        let dict = Dictionary::open_default().unwrap();
+        let bos = |left: Option<Rcid>| {
+            let mut l = manual(1, vec![(0, 1, elem("あ", "ア", 1288, 1288, 501, -5.0))]);
+            if let Some(left) = left {
+                l.start_after(left);
+            }
+            l.run(&dict, 9, None);
+            (l.regs[l.eos[0] as usize].total, l.nodes[0].elem.clone())
+        };
+        let (plain, plain_start) = bos(None);
+        let (seeded, seeded_start) = bos(Some(Rcid(1283)));
+        assert_ne!(dict.cc(0, 1288).to_bits(), dict.cc(1283, 1288).to_bits(), "前提: 始点が変わると連接コストが変わる");
+        assert_eq!(plain.to_bits(), (0.0 + -5.0 + dict.cc(0, 1288)).to_bits());
+        assert_eq!(seeded.to_bits(), (0.0 + -5.0 + dict.cc(1283, 1288)).to_bits());
+        assert_eq!(seeded_start.rcid, 1283);
+        assert_eq!((seeded_start.lcid, seeded_start.mid, seeded_start.word.as_str()), (plain_start.lcid, plain_start.mid, plain_start.word.as_str()), "rcid 以外は BOS のまま");
     }
 
     #[test]

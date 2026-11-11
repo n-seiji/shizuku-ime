@@ -1038,7 +1038,7 @@ pub fn bench_cli(path: &str) -> i32 {
         rev += 1;
         // 審判なしの engine の順 (比較の基準) と、実際の経路 (審判あり)。
         let base: Vec<String> = core.convert_all(reading).main.iter().map(|c| c.text.replace('\u{1F}', "")).collect();
-        engine.set_context("", false);
+        engine.set_context("", None, false);
         let live = engine.convert(rev, reading);
         if let Some(m) = take_last_ms() {
             ms.push(m);
@@ -1050,7 +1050,7 @@ pub fn bench_cli(path: &str) -> i32 {
         if context.is_empty() {
             continue;
         }
-        engine.set_context(context, false);
+        engine.set_context(context, None, false);
         let with_ctx = engine.convert(rev, reading);
         let fresh = context != prev_ctx;
         if let Some(m) = take_last_ms() {

@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
 //! アプリごとの「Shizuku を通して直前に打った文字列」。変換の文脈と記号の幅の判断に使う。
 //! アプリ側の文字は読まない。メモリ上だけに置き、ファイルにもログにも書かない。時刻は呼び出し側から渡すので、純粋に試せる。
+//! 文字列のほかに、その最後の語の右の連接 ID (`Rcid`) も持つ。Shizuku が確定した engine の候補の語で終わっているときだけ Some で、変換の左端になる。
 
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
+
+use crate::kkc::elem::Rcid;
 
 /// 覚えるアプリの数。使った順に新しい 10 個。
 const MAX_APPS: usize = 10;
@@ -20,6 +23,8 @@ const MIN_VOTES: u32 = 12;
 struct Entry {
     app: String,
     text: String,
+    /// `text` が Shizuku の確定した engine の候補で終わるときの、その最後の語の右の連接 ID。素通しの文字や Backspace が来たら None。
+    tail: Option<Rcid>,
     last: Instant,
     /// 直近の投票。最新が bit 0 で、1 が英語。数えるのは下位 `len` ビットだけ。文字は持たない。
     votes: u32,
@@ -30,6 +35,12 @@ struct Entry {
 /// 仮名・漢字・カタカナ (半角を含む) か。
 fn is_japanese(c: char) -> bool {
     matches!(c, '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}' | '\u{FF66}'..='\u{FF9F}')
+}
+
+/// 語の続きとして次の変換につながる文字列か。仮名・漢字・カタカナ (半角、長音 ー、踊り字 々 を含む) で終われば true。
+/// 句読点・括弧・中黒 ・ ・その他の記号・英数字・空で終われば false (次の文や文節は文頭から変換する)。
+pub fn ends_with_word(text: &str) -> bool {
+    text.chars().next_back().is_some_and(|c| c == '\u{3005}' || (is_japanese(c) && c != '\u{30FB}'))
 }
 
 /// 1 回の入力が英語の票 (Some(true))・日本語の票 (Some(false))・票なし (None) のどれか。
@@ -65,13 +76,14 @@ pub struct ContextStore {
 
 impl ContextStore {
     /// `text` を `app` の文脈の末尾に足す。改行は文の切れ目として残す (素通しの Backspace と数が合うよう、続く改行も全部残す)。
-    pub fn record(&mut self, app: &str, text: &str, now: Instant) {
+    /// `tail` は足した文字列が engine の候補で終わるときだけ Some。足すたびに置き換わるので、素通しの文字 (None) は前の連接 ID を消す。
+    pub fn record(&mut self, app: &str, text: &str, tail: Option<Rcid>, now: Instant) {
         if text.is_empty() {
             return;
         }
         let mut entry = match self.entries.iter().position(|e| e.app == app) {
             Some(i) => self.entries.remove(i),
-            None => Entry { app: app.to_string(), text: String::new(), last: now, votes: 0, len: 0 },
+            None => Entry { app: app.to_string(), text: String::new(), tail: None, last: now, votes: 0, len: 0 },
         };
         if now.saturating_duration_since(entry.last) >= STALE_AFTER {
             entry.text.clear();
@@ -82,6 +94,7 @@ impl ContextStore {
             entry.push_vote(english);
         }
         entry.text.push_str(text);
+        entry.tail = tail;
         let extra = entry.text.chars().count().saturating_sub(MAX_CHARS);
         if extra > 0 {
             let cut = entry.text.char_indices().nth(extra).map_or(entry.text.len(), |(i, _)| i);
@@ -94,23 +107,31 @@ impl ContextStore {
         self.entries.push(entry);
     }
 
+    /// `app` の使える記録。12 時間 (起動中) 以上入力が無ければ無い。文字列・連接 ID・英語のアプリかの読み出しはすべてここを通る。
+    fn fresh(&self, app: &str, now: Instant) -> Option<&Entry> {
+        self.entries.iter().find(|e| e.app == app && now.saturating_duration_since(e.last) < STALE_AFTER)
+    }
+
     /// `app` の文脈。12 時間 (起動中) 以上入力が無ければ空。
     pub fn get(&self, app: &str, now: Instant) -> &str {
-        self.entries
-            .iter()
-            .find(|e| e.app == app && now.saturating_duration_since(e.last) < STALE_AFTER)
-            .map_or("", |e| e.text.as_str())
+        self.fresh(app, now).map_or("", |e| e.text.as_str())
+    }
+
+    /// `app` の文脈の最後の語の右の連接 ID。`get` と同じく、12 時間 (起動中) 以上入力が無ければ None。
+    pub fn tail(&self, app: &str, now: Instant) -> Option<Rcid> {
+        self.fresh(app, now).and_then(|e| e.tail)
     }
 
     /// `app` が英語を打つアプリか (直近 32 回の確定の 75% 以上が英語で、12 回以上溜まっているとき)。知らない・12 時間たったアプリは false。
     pub fn is_english_app(&self, app: &str, now: Instant) -> bool {
-        self.entries.iter().find(|e| e.app == app && now.saturating_duration_since(e.last) < STALE_AFTER).is_some_and(Entry::is_english)
+        self.fresh(app, now).is_some_and(Entry::is_english)
     }
 
-    /// 後ろの 1 文字を取り除く (素通しの Backspace)。
+    /// 後ろの 1 文字を取り除く (素通しの Backspace)。文字列の末尾が変わるので連接 ID も捨てる。
     pub fn pop(&mut self, app: &str) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.app == app) {
             e.text.pop();
+            e.tail = None;
         }
     }
 
@@ -176,8 +197,8 @@ mod tests {
     #[test]
     fn 追記した文字列を返し_知らないアプリは空() {
         let (mut s, t) = (ContextStore::default(), Instant::now());
-        s.record("a", "机の", t);
-        s.record("a", "上", t);
+        s.record("a", "机の", None, t);
+        s.record("a", "上", None, t);
         assert_eq!(s.get("a", t), "机の上");
         assert_eq!(s.get("b", t), "");
     }
@@ -185,8 +206,8 @@ mod tests {
     #[test]
     fn 百文字を超えたら後ろから残す() {
         let (mut s, t) = (ContextStore::default(), Instant::now());
-        s.record("a", &"あ".repeat(90), t);
-        s.record("a", &"い".repeat(30), t);
+        s.record("a", &"あ".repeat(90), None, t);
+        s.record("a", &"い".repeat(30), None, t);
         let got = s.get("a", t);
         assert_eq!(got.chars().count(), MAX_CHARS);
         assert!(got.starts_with('あ') && got.ends_with('い'));
@@ -196,9 +217,9 @@ mod tests {
     #[test]
     fn 改行は切れ目として全部残り_バックスペースと数が合う() {
         let (mut s, t) = (ContextStore::default(), Instant::now());
-        s.record("a", "前の行\n次の", t);
+        s.record("a", "前の行\n次の", None, t);
         assert_eq!(s.get("a", t), "前の行\n次の");
-        s.record("a", "\n\n", t);
+        s.record("a", "\n\n", None, t);
         assert_eq!(s.get("a", t), "前の行\n次の\n\n");
         s.pop("a");
         assert_eq!(s.get("a", t), "前の行\n次の\n");
@@ -208,10 +229,10 @@ mod tests {
     fn 十個を超えると最も使っていないアプリを忘れる() {
         let (mut s, t) = (ContextStore::default(), Instant::now());
         for i in 0..10 {
-            s.record(&format!("app{i}"), "x", t);
+            s.record(&format!("app{i}"), "x", None, t);
         }
-        s.record("app0", "y", t);
-        s.record("app10", "z", t);
+        s.record("app0", "y", None, t);
+        s.record("app10", "z", None, t);
         assert_eq!(s.get("app0", t), "xy", "最近使ったアプリは残る");
         assert_eq!(s.get("app1", t), "", "最も使っていないアプリが追い出される");
         assert_eq!(s.get("app10", t), "z");
@@ -220,25 +241,87 @@ mod tests {
     #[test]
     fn 数時間たっても文脈は残り_十二時間たつと使わず_次の確定は新しく始まる() {
         let (mut s, t) = (ContextStore::default(), Instant::now());
-        s.record("a", "古い", t);
+        s.record("a", "古い", None, t);
         let later = t + STALE_AFTER;
         assert_eq!(s.get("a", t + Duration::from_secs(6 * 60 * 60)), "古い");
         assert_eq!(s.get("a", t + STALE_AFTER - Duration::from_secs(1)), "古い");
         assert_eq!(s.get("a", later), "");
-        s.record("a", "新しい", later);
+        s.record("a", "新しい", None, later);
         assert_eq!(s.get("a", later), "新しい");
     }
 
     #[test]
     fn 後ろの一文字を消し_全部を捨てられる() {
         let (mut s, t) = (ContextStore::default(), Instant::now());
-        s.record("a", "ab", t);
-        s.record("b", "cd", t);
+        s.record("a", "ab", None, t);
+        s.record("b", "cd", None, t);
         s.pop("a");
         assert_eq!(s.get("a", t), "a");
         assert_eq!(s.get("b", t), "cd");
         s.clear_all();
         assert_eq!(s.get("b", t), "");
+    }
+
+    const UKETSUKE: Rcid = Rcid(1283);
+    const KEN: Rcid = Rcid(1284);
+
+    #[test]
+    fn 連接_id_は足すたびに置き換わり_素通しの文字と改行で消える() {
+        let (mut s, t) = (ContextStore::default(), Instant::now());
+        assert_eq!(s.tail("a", t), None, "知らないアプリ");
+        s.record("a", "受付", Some(UKETSUKE), t);
+        assert_eq!((s.get("a", t), s.tail("a", t)), ("受付", Some(UKETSUKE)));
+        s.record("a", "件", Some(KEN), t);
+        assert_eq!((s.get("a", t), s.tail("a", t)), ("受付件", Some(KEN)), "新しい確定の ID に置き換わる");
+        s.record("a", "!", None, t);
+        assert_eq!((s.get("a", t), s.tail("a", t)), ("受付件!", None), "素通しの文字は ID を消す");
+        s.record("a", "受付", Some(UKETSUKE), t);
+        s.record("a", "\n", None, t);
+        assert_eq!((s.get("a", t), s.tail("a", t)), ("受付件!受付\n", None), "改行も消す");
+    }
+
+    #[test]
+    fn 後ろの一文字を消すと連接_id_も消え_ほかのアプリは残る() {
+        let (mut s, t) = (ContextStore::default(), Instant::now());
+        s.record("a", "受付", Some(UKETSUKE), t);
+        s.record("b", "件", Some(KEN), t);
+        s.pop("a");
+        assert_eq!((s.get("a", t), s.tail("a", t)), ("受", None));
+        assert_eq!((s.get("b", t), s.tail("b", t)), ("件", Some(KEN)), "アプリごとに別");
+        s.pop("none");
+        assert_eq!(s.tail("b", t), Some(KEN), "知らないアプリの pop は何も変えない");
+        s.clear_all();
+        assert_eq!(s.tail("b", t), None);
+    }
+
+    #[test]
+    fn 十二時間たつと連接_id_も使わず_次の記録は古い_id_を引き継がない() {
+        let (mut s, t) = (ContextStore::default(), Instant::now());
+        s.record("a", "受付", Some(UKETSUKE), t);
+        assert_eq!(s.tail("a", t + STALE_AFTER - Duration::from_secs(1)), Some(UKETSUKE));
+        assert_eq!((s.get("a", t + STALE_AFTER), s.tail("a", t + STALE_AFTER)), ("", None), "文字列と同じく使わない");
+        s.record("a", "!", None, t + STALE_AFTER);
+        assert_eq!((s.get("a", t + STALE_AFTER), s.tail("a", t + STALE_AFTER)), ("!", None));
+    }
+
+    #[test]
+    fn 追い出されたアプリの連接_id_も消える() {
+        let (mut s, t) = (ContextStore::default(), Instant::now());
+        s.record("app0", "受付", Some(UKETSUKE), t);
+        for i in 1..=10 {
+            s.record(&format!("app{i}"), "x", None, t);
+        }
+        assert_eq!(s.tail("app0", t), None);
+    }
+
+    #[test]
+    fn 仮名と漢字とカタカナで終わる文字列だけが語の続きになる() {
+        for word in ["受付", "うけつけ", "ウケツケ", "コーヒー", "人々", "ｱｲｳ", "ｺｰﾋｰ", "行こう。受付", "abcあ"] {
+            assert!(ends_with_word(word), "{word}");
+        }
+        for not_word in ["", "受付。", "受付、", "受付？", "受付！", "受付」", "受付』", "受付・", "受付)", "受付 ", "受付\n", "受付1", "受付a", "受付〜", "受付…", "ab"] {
+            assert!(!ends_with_word(not_word), "{not_word:?}");
+        }
     }
 
     #[test]
@@ -273,10 +356,10 @@ mod tests {
 
     fn votes(s: &mut ContextStore, t: Instant, english: usize, japanese: usize) {
         for _ in 0..english {
-            s.record("a", "word ", t);
+            s.record("a", "word ", None, t);
         }
         for _ in 0..japanese {
-            s.record("a", "ことば", t);
+            s.record("a", "ことば", None, t);
         }
     }
 
@@ -328,17 +411,17 @@ mod tests {
         let t = Instant::now();
         let mut s = ContextStore::default();
         votes(&mut s, t, 12, 0);
-        s.record("a", "123 \n", t);
+        s.record("a", "123 \n", None, t);
         assert!(s.is_english_app("a", t));
         assert_eq!(s.entries[0].len, 12);
         s.pop("a");
         assert!(s.is_english_app("a", t), "pop は票に触れない");
         assert!(!s.is_english_app("a", t + STALE_AFTER), "12 時間たつと使わない");
-        s.record("a", "word", t + STALE_AFTER);
+        s.record("a", "word", None, t + STALE_AFTER);
         assert_eq!(s.entries[0].len, 1, "古い票は捨てて数え直す");
         votes(&mut s, t, 12, 0);
         for i in 0..10 {
-            s.record(&format!("app{i}"), "x", t);
+            s.record(&format!("app{i}"), "x", None, t);
         }
         assert!(!s.is_english_app("a", t), "追い出されると票も消える");
         votes(&mut s, t, 12, 0);

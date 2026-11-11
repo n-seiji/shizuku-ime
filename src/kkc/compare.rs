@@ -697,7 +697,12 @@ pub fn bench_cli(reading: &str) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::dict::to_katakana;
+    use super::super::elem::{is_clause, Elem, Rcid};
+    use super::super::{Limits, RustEngine};
     use super::*;
+    use crate::composer::CandidateEngine;
+    use std::rc::Rc;
 
     fn v(items: &[(&str, u32)]) -> Vec<View> {
         items.iter().map(|(t, b)| (t.to_string(), *b)).collect()
@@ -713,6 +718,100 @@ mod tests {
         assert!(matches!(j.get("b").unwrap().get("c"), Some(Json::Bool)));
         assert!(parse_json("{").is_err());
         assert!(parse_json("[1] x").is_err());
+    }
+
+    #[derive(Default)]
+    struct Agreement {
+        cases: usize,
+        both_right: usize,
+        right_to_wrong: usize,
+        wrong_to_right: usize,
+        both_wrong: usize,
+    }
+
+    impl Agreement {
+        fn add(&mut self, plain: bool, seeded: bool) {
+            self.cases += 1;
+            match (plain, seeded) {
+                (true, true) => self.both_right += 1,
+                (true, false) => self.right_to_wrong += 1,
+                (false, true) => self.wrong_to_right += 1,
+                (false, false) => self.both_wrong += 1,
+            }
+        }
+
+        fn line(&self, name: &str) -> String {
+            format!(
+                "{name:22} cases {:5} | plain right {:5} | seeded right {:5} | both right {:5} | right->wrong {:4} | wrong->right {:4} | both wrong {:5}",
+                self.cases,
+                self.both_right + self.right_to_wrong,
+                self.both_right + self.wrong_to_right,
+                self.both_right,
+                self.right_to_wrong,
+                self.wrong_to_right,
+                self.both_wrong
+            )
+        }
+    }
+
+    fn no_judge(_context: &str, _texts: &[&str], _scores: &[f32]) -> Option<Vec<usize>> {
+        None
+    }
+
+    /// 1 回で打った全文の第 1 候補 (審判なし・IME の上限) を語の切れ目で前後に分け、後ろだけを変換したとき、全文の後ろと同じ第 1 候補になるかを数える。
+    /// 左端が文頭のまま (plain) と、前の最後の語の右の連接 ID にしたとき (seeded) を比べる。前が語で終わらない切れ目 (。など) は IME が使わないので数えない。
+    /// 数だけ出し、読みも表記も出さない。
+    fn measure_tail_agreement(name: &str, readings: &[String]) {
+        let core = Rc::new(KkcCore::open_with_limits(Limits::IME).unwrap());
+        let (mut words, mut clauses) = (Agreement::default(), Agreement::default());
+        let (mut rows, mut skipped) = (0usize, 0usize);
+        for reading in readings {
+            let mut one = RustEngine::with_core(core.clone()).with_judge(no_judge);
+            let shown = one.convert(1, reading);
+            let Some(data) = one.last.as_ref().and_then(|(_, lists)| lists.first()).cloned() else { continue };
+            let text = |words: &[Rc<Elem>]| words.iter().map(|e| e.word.replace('\u{1F}', "")).collect::<String>();
+            let covers = data.iter().map(|e| e.ruby.as_str()).collect::<String>() == to_katakana(reading);
+            if shown.first() != Some(&text(&data)) || !covers {
+                skipped += 1;
+                continue;
+            }
+            rows += 1;
+            for k in 1..data.len() {
+                let head_chars: usize = data[..k].iter().map(|e| e.ruby.chars().count()).sum();
+                let tail_reading: String = reading.chars().skip(head_chars).collect();
+                let (head_text, want) = (text(&data[..k]), text(&data[k..]));
+                if !crate::context::ends_with_word(&head_text) {
+                    // 語で終わらない確定のあとは、IME は連接 ID を使わず文頭から変換する。
+                    continue;
+                }
+                let right = |left: Option<Rcid>| {
+                    let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
+                    e.set_context(&head_text, left, false);
+                    e.convert(1, &tail_reading).first() == Some(&want)
+                };
+                let (plain, seeded) = (right(None), right(Some(Rcid(data[k - 1].rcid))));
+                words.add(plain, seeded);
+                if is_clause(data[k - 1].rcid, data[k].lcid) {
+                    clauses.add(plain, seeded);
+                }
+            }
+        }
+        println!("{name}: rows {rows} (skipped {skipped})");
+        println!("{}", words.line("every word boundary"));
+        println!("{}", clauses.line("clause boundaries only"));
+    }
+
+    /// 連接 ID を左端に置く効果の計測。`cargo test --release measure_left_id -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn measure_left_id_keeps_the_one_shot_tail() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/golden/fresh.jsonl.gz");
+        let mut readings: Vec<String> = load_golden(&path).unwrap().into_iter().map(|r| r.reading).collect();
+        readings.sort();
+        readings.dedup();
+        measure_tail_agreement("golden/fresh", &readings);
+        readings.retain(|r| r.chars().count() >= 8);
+        measure_tail_agreement("golden/fresh, 8+ kana", &readings);
     }
 
     #[test]
