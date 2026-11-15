@@ -134,6 +134,19 @@ struct KanaThenLiteral {
     literal: String,
 }
 
+/// 組成の末尾の、大文字だけの略語 (2 文字以上) とそのあとの小文字の打鍵 (`Composer::acronym_run`)。
+struct AcronymRun {
+    /// 略語の最初の区切りの位置。手前はかな (空でもよい)。
+    start: usize,
+    head: String,
+    /// 略語のあとの最初の区切りの位置。
+    tail_start: usize,
+    /// 略語のあとの小文字の打鍵。
+    tail_raw: String,
+    /// 略語のあとの区切りがすでにかなになっている (`fold_acronym` で組み替え済み) か。
+    folded: bool,
+}
+
 /// 入力中の打鍵の解釈。Empty は未確定文が無い状態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Typing {
@@ -289,6 +302,32 @@ const LIVE_MIN_KANA: usize = 2;
 const PENDING_N: &str = "n";
 const PENDING_N_KANA: &str = "ん";
 
+/// 候補列の各候補の末尾 `old` を `new` に置き換えた候補列。末尾が `old` でない候補があれば None (使い回せない)。
+fn swap_suffix(list: &[Candidate], old: &str, new: &str) -> Option<Vec<Candidate>> {
+    list.iter().map(|c| Some(Candidate { text: format!("{}{new}", c.text.strip_suffix(old)?), source: c.source })).collect()
+}
+
+/// 略語の手前の変換 (prefixes) と、略語 + 続きの変換 (tails) をつなぐ。手前を変換しなければ before_rest をそのまま付ける。
+/// 続きの候補を先に (手前は第 1 候補)、そのあとに手前の別候補 (続きは第 1 候補) を並べる。engine の添字は続きのもの。
+fn join_acronym_candidates(prefixes: &[Candidate], tails: &[Candidate], before_rest: &str, pending: &str) -> Vec<Candidate> {
+    let join = |before: &str, tail: &Candidate| Candidate { text: format!("{before}{}{pending}", tail.text), source: tail.source };
+    let mut list: Vec<Candidate> = Vec::new();
+    let mut push = |candidate: Candidate| {
+        if !list.iter().any(|c| c.text == candidate.text) {
+            list.push(candidate);
+        }
+    };
+    match (prefixes.first(), tails.first()) {
+        (Some(first), Some(first_tail)) => {
+            tails.iter().for_each(|t| push(join(&first.text, t)));
+            prefixes.iter().skip(1).for_each(|p| push(join(&p.text, first_tail)));
+        }
+        (None, _) => tails.iter().for_each(|t| push(join(before_rest, t))),
+        (Some(_), None) => {}
+    }
+    list
+}
+
 pub struct Composer<E: CandidateEngine, L: Lexicon> {
     engine: E,
     segments: Vec<Segment>,
@@ -300,6 +339,8 @@ pub struct Composer<E: CandidateEngine, L: Lexicon> {
     english_shown: bool,
     /// 英語分割で英単語にまとめる前の区切りと未確定の打鍵。取り消しで分割前の打鍵中に戻すために持つ。
     split_origin: Option<(Vec<Segment>, String)>,
+    /// `fold_acronym` が作った、略語の手前 (固定のあとの残り) の見え方の候補。手前の読みと固定の長さが同じ間は変換し直さずに使い回し、固定中に組み替えを戻すときの候補列も作り直す。
+    acronym_prefix: Option<(String, Vec<Candidate>)>,
     /// live 変換で英語分割を表示している間の、(英単語, かな部分, 英単語 + 変換したかなの候補列)。
     /// 見えている分割と、Enter で確定される分割 (未確定のローマ字を確定かなとした分割) が違えば両方持つ。
     /// 打鍵が英単語とかな部分を変えなければ変換し直さない。`reading` とは別に持つ。
@@ -325,6 +366,7 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
             typing: Typing::Empty,
             english_shown: false,
             split_origin: None,
+            acronym_prefix: None,
             live_split: Vec::new(),
             reading: ReadingCands { generation: 0, list: Vec::new() },
             stage: Stage::Editing,
@@ -969,7 +1011,8 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
     }
 
     pub fn closed_by_punct_after_english_head(&self) -> bool {
-        matches!(self.segments.as_slice(), [Segment::Literal(_), .., Segment::Kana { kana, .. }] if PUNCT_KANA.contains(&kana.as_str()))
+        self.segments.iter().any(Segment::is_literal)
+            && matches!(self.segments.last(), Some(Segment::Kana { kana, .. }) if PUNCT_KANA.contains(&kana.as_str()))
     }
 
     /// 組成全体 (raw) の判定が `verdict` か。
@@ -1114,8 +1157,15 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
     }
 
     pub fn push_literal(&mut self, text: &str) {
-        let converted = self.live_mixed_kept();
-        if converted.is_none() {
+        // 略語のあとのかなは、小文字の続きを打ったら打鍵を足したあとにもう一度判定する (URLmo + d は mode の途中)。
+        // 大文字・数字・記号は、組み替えたかなの後ろにそのまま付く (小文字の英語分割のあとと同じ)。
+        // 組み替え済みの略語があるまま、組み替えない英字を足すとき (keep) は、見えている候補列と固定をそのまま保ち、足した文字を各候補の後ろに付ける。
+        let folded_before = self.in_literal_composition() && self.has_folded_acronym();
+        let unfolded = text.bytes().all(|b| b.is_ascii_lowercase()) && self.unfold_acronym();
+        // 戻したが組み替え直せないときも、手前に組み替え済みの略語が残っていれば同じに扱う (打った英字を後ろに付ける)。
+        let keep = (folded_before && !unfolded) || (unfolded && self.has_folded_acronym());
+        let converted = if unfolded && self.pin.is_none() { None } else { self.live_mixed_kept() };
+        if converted.is_none() && !keep {
             self.pin = None;
             if !self.candidates().is_empty() {
                 self.engine.cancel();
@@ -1140,9 +1190,152 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
             self.segments.push(Segment::Literal(text.to_string()));
         }
         self.sync_hiragana();
-        self.sync_live_mixed(converted);
+        if keep {
+            self.reading.list.iter_mut().for_each(|c| c.text.push_str(text));
+        }
+        if self.fold_acronym() {
+            self.sync_hiragana();
+        } else if !keep {
+            self.sync_live_mixed(converted);
+        }
         self.stage = Stage::Editing;
         self.typing = self.literal_typing();
+    }
+
+    /// 組成の末尾が「大文字だけの略語 (2 文字以上) + 小文字」なら、その位置と打鍵。手前に英字の区切りがあるとき (Tokyo + URL) は対象外。
+    /// 略語のあとの区切りは、打った小文字 (Literal) か、`fold_acronym` が打鍵のまま (keys) かなにしたもの (Kana) だけ。
+    fn acronym_run(&self) -> Option<AcronymRun> {
+        let upper = |s: &Segment| matches!(s, Segment::Literal(t) if !t.is_empty() && t.bytes().all(|b| b.is_ascii_uppercase()));
+        let lower = |s: &Segment| match s {
+            Segment::Literal(t) => t.bytes().all(|b| b.is_ascii_lowercase()),
+            Segment::Kana { keys, .. } => !keys.is_empty() && keys.bytes().all(|b| b.is_ascii_lowercase()),
+        };
+        let last_upper = self.segments.iter().rposition(upper)?;
+        let tail = &self.segments[last_upper + 1..];
+        if tail.is_empty() || !tail.iter().all(lower) {
+            return None;
+        }
+        let mut start = last_upper;
+        while start > 0 && upper(&self.segments[start - 1]) {
+            start -= 1;
+        }
+        // 手前が英字の区切り (Tokyo + URL) や、かなにしきれず残った英字・数字 (macOS の c, 1OS の 1) なら、略語にしない。
+        match start.checked_sub(1).map(|i| &self.segments[i]) {
+            Some(Segment::Literal(_)) => return None,
+            Some(Segment::Kana { kana, .. }) if kana.chars().last().is_some_and(|c| c.is_ascii_alphanumeric()) => return None,
+            _ => {}
+        }
+        let head: String = self.segments[start..=last_upper].iter().map(Segment::keys).collect();
+        english_split::is_acronym(&head).then(|| AcronymRun {
+            start,
+            head,
+            tail_start: last_upper + 1,
+            tail_raw: tail.iter().map(Segment::keys).collect(),
+            folded: tail.iter().any(|s| !s.is_literal()),
+        })
+    }
+
+    /// `fold_acronym` で組み替えた略語のあとのかなを、打った小文字の英字に戻す。打鍵の列は変わらない。戻したら true。
+    /// 固定中、または手前に組み替え済みの略語があるときは、固定と手前の見え方を保つので、控えた手前の候補 (`fold_acronym` が控えたもの) に打った英字を付けた候補列に戻す。
+    fn unfold_acronym(&mut self) -> bool {
+        if !self.in_literal_composition() {
+            return false;
+        }
+        let Some(run) = self.acronym_run().filter(|run| run.folded) else {
+            return false;
+        };
+        self.segments.truncate(run.tail_start);
+        self.segments.extend(run.tail_raw.chars().map(|ch| Segment::Literal(ch.to_string())));
+        if self.pin.is_some() || self.has_folded_acronym() {
+            let literal = format!("{}{}", run.head, run.tail_raw);
+            let prefix = self.acronym_prefix.iter().flat_map(|(_, list)| list);
+            self.reading.list = prefix.map(|c| Candidate { text: format!("{}{literal}", c.text), source: c.source }).collect();
+        }
+        self.sync_hiragana();
+        true
+    }
+
+    /// 英字入力 (Literal / Mixed) の組成を編集中で、未確定のローマ字が無い。略語の組み替えと打ち直しができる状態。
+    fn in_literal_composition(&self) -> bool {
+        matches!(self.stage, Stage::Editing) && matches!(self.typing, Typing::Literal | Typing::Mixed) && self.romaji.buffer().is_empty()
+    }
+
+    /// `fold_acronym` で組み替えた略語 (Literal の略語の直後にかな) を含むか。句読点を足した (`Typing::Kana` に戻った) あとも含む。
+    fn has_folded_acronym(&self) -> bool {
+        self.segments.windows(2).any(|w| {
+            matches!(&w[0], Segment::Literal(t) if english_split::is_acronym(t)) && matches!(&w[1], Segment::Kana { .. })
+        })
+    }
+
+    /// 略語 + 助詞などで始まるかな の組成なら、略語を英語の頭 (Literal)、続きをかなの区切りに組み替え、変換の候補を作る。組み替えたら true。
+    /// 手前のかなは、live 変換で十分な長さがあれば変換する (その分の変換を先に、続きの変換を最後に行う: engine の添字は最後の変換のもの)。
+    /// 手前が固定されているときは固定を保ち、固定のあとの残りだけを手前として扱う (`display` が固定 + 候補の先頭を見せる)。
+    fn fold_acronym(&mut self) -> bool {
+        let Some(run) = self.acronym_run() else {
+            return false;
+        };
+        let split = english_split::split_acronym(&run.head, &run.tail_raw, |w| self.is_english_word_raw(w));
+        let Some(split) = split else {
+            return false;
+        };
+        let before: Vec<Segment> = self.segments[..run.start].to_vec();
+        let pinned = self.pin.as_ref().map_or(0, Pin::reading_len);
+        let before_rest: String = before.iter().map(Segment::reading).collect::<String>().chars().skip(pinned).collect();
+        let reused = self.reusable_before(&run, &before, &before_rest, pinned);
+        let pending = split.pending.clone();
+        let tail_kana = split.tail_kana();
+        self.segments = before
+            .iter()
+            .cloned()
+            .chain(Segment::from_split(split.head.clone(), split.tail))
+            .chain((!pending.is_empty()).then(|| Segment::Kana { keys: pending.clone(), kana: pending.clone() }))
+            .collect();
+        self.split_origin = None;
+        self.reset_candidates();
+        let prefixes = match reused {
+            Some(list) => list,
+            None if self.converts_before(&before, &before_rest) => self.convert_mixed("", &before_rest),
+            None => Vec::new(),
+        };
+        let tails = self.convert_mixed(&split.head, &tail_kana);
+        let mut list = join_acronym_candidates(&prefixes, &tails, &before_rest, &pending);
+        self.put_hiragana_first(&mut list, prefixes.first().map_or(before_rest.as_str(), |p| p.text.as_str()), &split.head, &tail_kana, &pending);
+        self.reading.list = list;
+        self.acronym_prefix = Some((format!("{pinned}:{before_rest}"), prefixes));
+        true
+    }
+
+    /// 略語の手前のかなを engine で変換するか (かなだけで、固定中か live で十分な長さがあるとき)。
+    fn converts_before(&self, before: &[Segment], before_rest: &str) -> bool {
+        let kana_only = !before.is_empty() && before.iter().all(|s| matches!(s, Segment::Kana { .. }) && !s.has_ascii_kana());
+        kana_only && !before_rest.is_empty() && (self.pin.is_some() || self.live_converts(before_rest))
+    }
+
+    /// 略語の手前の見え方の候補を、変換し直さずに使えるなら返す。
+    /// 控えた結果 (`acronym_prefix`) は、手前の読みと固定の長さが同じ間だけ使い回す。手前が組み替え済みの略語を含むときは、見えている候補列から今回の略語の打鍵を除いたものを使う。
+    /// 手前を変換しない条件 (非 live) でも、手前がかなだけなら控えの変換結果は使わない。
+    fn reusable_before(&self, run: &AcronymRun, before: &[Segment], before_rest: &str, pinned: usize) -> Option<Vec<Candidate>> {
+        let convert = self.converts_before(before, before_rest);
+        let kana_only = !before.is_empty() && before.iter().all(|s| matches!(s, Segment::Kana { .. }) && !s.has_ascii_kana());
+        let key = format!("{pinned}:{before_rest}");
+        let cached = self.acronym_prefix.as_ref().filter(|(k, list)| *k == key && !(convert && list.is_empty()));
+        if let Some((_, list)) = cached {
+            return Some(if kana_only && !convert { Vec::new() } else { list.clone() });
+        }
+        let typed: String = self.segments[run.start..].iter().map(Segment::keys).collect();
+        (!kana_only && before.iter().any(Segment::is_literal)).then(|| swap_suffix(&self.reading.list, &typed, "")).flatten()
+    }
+
+    /// live で続きが `LIVE_MIN_KANA` かな以下なら、変換しないひらがなの候補を先頭に入れる (変換結果は後ろに残るので、Space で変換できる)。
+    fn put_hiragana_first(&self, list: &mut Vec<Candidate>, base: &str, head: &str, tail_kana: &str, pending: &str) {
+        if !self.live || self.live_converts(tail_kana) {
+            return;
+        }
+        let hiragana = format!("{base}{head}{tail_kana}{pending}");
+        if let Some(source) = list.first().map(|c| c.source) {
+            list.retain(|c| c.text != hiragana);
+            list.insert(0, Candidate { text: hiragana, source });
+        }
     }
 
     /// 英字入力を含む組成の打鍵の解釈。英字だけなら Literal、かなが混じれば Mixed。
@@ -1183,13 +1376,7 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
             self.reset_candidates();
             return;
         };
-        let reused = converted.filter(|old| old.kana == kana).and_then(|old| {
-            self.reading
-                .list
-                .iter()
-                .map(|c| Some(Candidate { text: format!("{}{literal}", c.text.strip_suffix(old.literal.as_str())?), source: c.source }))
-                .collect::<Option<Vec<_>>>()
-        });
+        let reused = converted.filter(|old| old.kana == kana).and_then(|old| swap_suffix(&self.reading.list, &old.literal, &literal));
         if let Some(list) = reused {
             self.reading.list = list;
             return;
@@ -1201,6 +1388,14 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
     }
 
     fn resync_live_mixed(&mut self) {
+        if matches!(self.stage, Stage::Editing) && self.unfold_acronym() {
+            // 戻した打鍵は、組み替えたときと同じなので、もう一度組み替えられる (変わるのは live の設定だけ)。
+            let refolded = self.fold_acronym();
+            debug_assert!(refolded, "unfolded acronym must fold again");
+            self.sync_hiragana();
+            self.typing = self.literal_typing();
+            return;
+        }
         if matches!(self.stage, Stage::Editing) && self.typing == Typing::Mixed && self.kana_then_literal().is_some() {
             let converted = self.live_mixed_kept();
             self.sync_live_mixed(converted);
@@ -1277,11 +1472,17 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
             return false;
         }
         self.split_origin = None;
-        let was_literal = matches!(self.typing, Typing::Literal | Typing::Mixed);
-        let converted = if was_literal { self.live_mixed_kept() } else { None };
+        // 組み替えた略語を含む組成は、句読点を足して Typing::Kana に戻っていても、英字入力 (Literal / Mixed) として消し、打鍵のとおり判定し直す。
+        let acronym = matches!(self.stage, Stage::Editing) && self.romaji.buffer().is_empty() && self.has_folded_acronym();
+        // 略語のあとのかなは、打った小文字に戻してから 1 打鍵消し、もう一度判定する。
+        let unfolded = self.unfold_acronym();
+        let literal_typing = matches!(self.typing, Typing::Literal | Typing::Mixed);
+        let was_literal = literal_typing || acronym;
+        let converted = if literal_typing && (!unfolded || self.pin.is_some()) { self.live_mixed_kept() } else { None };
         // live 変換中は、見えている最後の 1 文字に当たる読みを消し、残りは見えているまま固定する。分からなければ 1 文字。
-        let dropped = self.live_drop();
+        let dropped = if acronym { None } else { self.live_drop() };
         let rest_was_empty = self.rest().is_empty();
+        let popped = self.segments.last().and_then(|s| s.reading().chars().last());
         for _ in 0..dropped.as_ref().map_or(1, |(count, _)| *count) {
             self.pop_reading_char();
         }
@@ -1294,12 +1495,26 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
         // 英単語の部分を消しきったら、残ったかなは通常の組成に戻す。
         if was_literal && self.segments.iter().any(Segment::is_literal) {
             self.sync_hiragana();
-            self.sync_live_mixed(converted);
+            self.resync_after_backspace(acronym, popped, converted);
             self.typing = self.literal_typing();
         } else {
             self.refresh();
         }
         true
+    }
+
+    /// Backspace のあと、英字入力の組成の候補列を作り直す。組み替え直せればそれを使い、組み替え済みの略語が残るなら見えている候補列から消した文字を除いて保つ
+    /// (大文字・数字を足したあと、2 つ目の略語の組み替えを戻したあと)。どちらもできなければ、かなと英字の組成として変換し直す。
+    fn resync_after_backspace(&mut self, acronym: bool, popped: Option<char>, converted: Option<KanaThenLiteral>) {
+        if self.fold_acronym() {
+            self.sync_hiragana();
+            return;
+        }
+        let kept = (acronym && self.has_folded_acronym()).then_some(popped).flatten().and_then(|ch| swap_suffix(&self.reading.list, &ch.to_string(), ""));
+        match kept {
+            Some(list) => self.reading.list = list,
+            None => self.sync_live_mixed(converted),
+        }
     }
 
     /// 最初の変換。保留中のリランキングを反映し、raw 候補を第 1 候補の直後に入れて先頭を選ぶ。
@@ -1404,6 +1619,7 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
         self.pin = None;
         self.segments.clear();
         self.split_origin = None;
+        self.acronym_prefix = None;
         self.romaji.clear();
         self.hiragana.clear();
         self.reset_candidates();
