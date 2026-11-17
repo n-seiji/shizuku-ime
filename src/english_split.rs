@@ -14,6 +14,9 @@ const TAILS: &[&str] = &[
 /// 辞書の英単語を頭に使う最小の長さ (Composer::is_typing_english の MIN_LEN と同じ)。
 const DICTIONARY_MIN_LEN: usize = 4;
 
+/// 続きの先頭をカタカナ語の読みと見なす最小のかな数 (`starts_with_katakana_word`)。
+const KATAKANA_WORD_MIN_KANA: usize = 3;
+
 /// 助詞で始まらない続き (loginjinihiraku の じに…) を許すとき、頭に含まれているべき字。
 /// 日本語のローマ字ではほぼ使わない (l, x は小文字かなだけ)。time + い (timei) のような日本語の打ち間違いを切らないための歯止め。
 const FOREIGN_LETTERS: [char; 4] = ['l', 'q', 'v', 'x'];
@@ -105,12 +108,28 @@ fn natural_kana(tail: &[(String, String)]) -> bool {
     true
 }
 
+/// 続きのかなの先頭が、辞書にあるカタカナ語の読み (ちぇっく → チェック, ふぁいる, ぺーじ) で、その読みに小さいかな (ぇ ぁ) が含まれ、残りが自然なかなか。
+/// 読みは 3 かな以上に限る (ふぁ だけで語と見なさない)。辞書の問い合わせは `has_reading` と同じ (見出しがカタカナ語かどうかは見ない。小さいかなを含む読みは外来語だけ)。
+fn starts_with_katakana_word(tail: &[(String, String)], is_reading: &impl Fn(&str) -> bool) -> bool {
+    let mut prefix = String::new();
+    for (n, (_, kana)) in tail.iter().enumerate() {
+        prefix.push_str(kana);
+        let unit = [(String::new(), prefix.clone())];
+        if prefix.chars().count() >= KATAKANA_WORD_MIN_KANA && !natural_kana(&unit) && is_reading(&prefix) && natural_kana(&tail[n + 1..]) {
+            return true;
+        }
+    }
+    false
+}
+
 /// raw を 英単語 + 助詞などで始まるかな に分ける。分けられなければ None。
 /// 英単語と見なすのは、全体がかなにしきれない (artifact の rt)、英語として確定したことのある語、
 /// または辞書の英単語 (4 文字以上。merge, commit) のいずれか。
 /// ただし、そのかな読みが日本語の語なら見なさない (made → まで)。辞書の英単語にも確定済みの語 (knows) にも掛ける
 /// (done を英語で選んだ後でも donewo を done + を にしない)。かなにしきれない語 (git) は確定済みなら分ける。
 /// 上の分け方で見つからず、全体がかなにしきれて、頭に l q v x を含む語 (login) のときに限り、助詞で始まらない続きでも分ける (loginjinihiraku → login + じに…)。
+/// 同じ頭 (l q v x を含む語) なら、全体がかなにしきれなくても (null の l)、続きがカタカナ語の読み (3 かな以上で小さいかなを含む。ちぇっく, ふぁいる) で始まり、そのあとが自然なかななら分ける (nulltyekku → null + ちぇっく)。
+/// 開発用語の一覧 (`is_dev_word`) の語は、長さやかな読みにかかわらず、続きが助詞などで始まるなら頭にする (gitwo → gitを, tokenga → tokenが)。ただし打鍵全体のかなの先頭が、頭のかなより長い辞書の見出し になるなら (jointo = ジョイント, todonotumari) 頭にしない。
 /// 全体がまだ英単語の途中 (informa) なら分けない。
 /// 「全体がかなにしきれる」は、打ちかけ (finished でない) なら末尾の未確定ローマ字 (loginj の j) を含んでよい。
 /// finished は Enter などで打ち終えたとき。途中なら末尾の未確定ローマ字を許す。
@@ -121,6 +140,7 @@ pub fn split(
     is_dictionary_word: impl Fn(&str) -> bool,
     is_word_prefix: impl Fn(&str) -> bool,
     is_japanese_reading: impl Fn(&str) -> bool,
+    is_dev_word: impl Fn(&str) -> bool,
 ) -> Option<Split> {
     if raw.len() < 3 || !raw.bytes().all(|b| b.is_ascii_lowercase()) {
         return None;
@@ -140,10 +160,35 @@ pub fn split(
         });
         starts_with_tail.then(|| Split { head: head.to_string(), tail, pending })
     };
-    let is_word = |head: &str| (knows(head) && not_japanese(head, &is_japanese_reading)) || dictionary_head(head, &is_dictionary_word, &is_japanese_reading);
+    // 開発用語の一覧の語は、長さにも かな読みにもよらず頭にする (一覧は、読みが日常の日本語にならない語だけを入れる約束)。
+    // ただし打鍵全体のかな (未確定の子音の手前まで) の先頭が、頭のかなより長い辞書の見出しになるなら (jointo = ジョイント, todonotumari = とどのつまり)、見出しをまたぐので頭にしない。
+    // 見出しの前方一致 (とどが は とどがわ の先頭) までは見ない: todoga まで英語でなくなるため。打鍵の途中 (todono〜todonotumar) は todoの… で、見出しになった時点 (todonotumari) で日本語に戻る。
+    // 全体のかなは 1 回だけ作り (打ちかけでも Enter でも同じ判定になるよう、未確定の n は ん として)、見出しになる長さを覚える。
+    let whole_reading = std::cell::OnceCell::new();
+    let crosses_headword = |head: &str| {
+        // (単位の打鍵の始まる位置, その単位までのかなの数) の並びと、見出しになるかなの数。かなにならない単位 (未確定の子音) の手前まで。
+        let (starts, headword_lens): &(Vec<(usize, usize)>, Vec<usize>) = whole_reading.get_or_init(|| {
+            let (units, _) = convert(raw, true);
+            let (mut at, mut count, mut kana) = (0, 0, String::new());
+            let mut starts = Vec::new();
+            for (typed, k) in units.iter().take_while(|(_, k)| !k.chars().any(|c| c.is_ascii_alphabetic())) {
+                kana.push_str(k);
+                count += k.chars().count();
+                starts.push((at, count));
+                at += typed.len();
+            }
+            let lens = kana.char_indices().map(|(i, c)| i + c.len_utf8()).filter(|&end| is_japanese_reading(&kana[..end])).map(|end| kana[..end].chars().count()).collect();
+            (starts, lens)
+        });
+        // 頭の打鍵に掛かる単位までが頭のかな (gitwo の two は t が頭にも掛かるので、ぎとぉ までが頭)。
+        let head_len = starts.iter().take_while(|(at, _)| *at < head.len()).last().map_or(0, |(_, count)| *count);
+        headword_lens.iter().any(|&n| n > head_len)
+    };
+    let is_word = |head: &str| (is_dev_word(head) && !crosses_headword(head)) || (knows(head) && not_japanese(head, &is_japanese_reading)) || dictionary_head(head, &is_dictionary_word, &is_japanese_reading);
     // 助詞で始まらない続きを許す分け方。外来語の綴りらしい頭と、日本語として自然な続きだけに絞る。
     // 打ちかけの未確定ローマ字 (loginj の j) は、かなにしきれない印にしない。
     // 全体の変換で かな 1 つ分の途中 (leann の lean|n は ん=nn の内側) になる位置では切らない。
+    // 全体がかなにしきれない (null の l が ASCII のまま残る) ときは foreign で、続きがカタカナ語で始まる場合 (nulltyekku → null + チェック) に限る。
     let relaxed_at = |boundaries: &[usize], i: usize| {
         let (head, rest) = raw.split_at(i);
         if !boundaries.contains(&i) || !head.contains(FOREIGN_LETTERS) || rest.contains(FOREIGN_TAIL_LETTERS) {
@@ -156,13 +201,21 @@ pub fn split(
         }
         let (tail, pending) = convert(rest, finished);
         let has_unit = !tail.is_empty() || !pending.is_empty();
-        if has_ascii(&tail) || (finished && !pending.is_empty()) || !has_unit || !natural_kana(&tail) {
+        if has_ascii(&tail) || (finished && !pending.is_empty()) || !has_unit {
+            return None;
+        }
+        // 続きの打鍵そのものが英単語 (fire, fan) やその前方一致なら、カタカナ語として切らない。末尾の未確定の n は、Enter と同じに ん として判定する。
+        let katakana_word = !(is_dictionary_word(rest) || is_word_prefix(rest)) && {
+            let settled = if pending == "n" { convert(rest, true).0 } else { tail.clone() };
+            starts_with_katakana_word(&settled, &is_japanese_reading)
+        };
+        if !(katakana_word || (!foreign && natural_kana(&tail))) {
             return None;
         }
         Some(Split { head: head.to_string(), tail, pending })
     };
     let relaxed = || {
-        if foreign || !raw.contains(FOREIGN_LETTERS) || is_word_prefix(raw) || knows(raw) {
+        if !raw.contains(FOREIGN_LETTERS) || is_word_prefix(raw) || knows(raw) {
             return None;
         }
         let boundaries: Vec<usize> = whole
@@ -252,7 +305,7 @@ mod tests {
     use super::*;
 
     fn shown(raw: &str) -> Option<String> {
-        split(raw, false, |_| false, |_| false, |_| false, |_| false).map(|s| s.display())
+        split(raw, false, |_| false, |_| false, |_| false, |_| false, |_| false).map(|s| s.display())
     }
 
     #[test]
@@ -276,8 +329,8 @@ mod tests {
 
     #[test]
     fn 打ち終えたら残りのローマ字が変換できないものは分けない() {
-        assert_eq!(split("artifactnish", true, |_| false, |_| false, |_| false, |_| false), None);
-        let done = split("artifactnin", true, |_| false, |_| false, |_| false, |_| false).unwrap();
+        assert_eq!(split("artifactnish", true, |_| false, |_| false, |_| false, |_| false, |_| false), None);
+        let done = split("artifactnin", true, |_| false, |_| false, |_| false, |_| false, |_| false).unwrap();
         assert_eq!(done.display(), "artifactにん");
     }
 
@@ -304,13 +357,13 @@ mod tests {
 
     #[test]
     fn 英語として確定したことのある語は母音で終わっても詰まりがなくても分ける() {
-        assert_eq!(split("mergeni", false, |w| w == "merge", |_| false, |_| false, |_| false).map(|s| s.display()).as_deref(), Some("mergeに"));
-        assert_eq!(split("openni", false, |w| w == "open", |_| false, |_| false, |_| false).map(|s| s.display()).as_deref(), Some("openに"));
-        assert_eq!(split("openni", false, |_| false, |_| false, |_| false, |_| false), None);
+        assert_eq!(split("mergeni", false, |w| w == "merge", |_| false, |_| false, |_| false, |_| false).map(|s| s.display()).as_deref(), Some("mergeに"));
+        assert_eq!(split("openni", false, |w| w == "open", |_| false, |_| false, |_| false, |_| false).map(|s| s.display()).as_deref(), Some("openに"));
+        assert_eq!(split("openni", false, |_| false, |_| false, |_| false, |_| false, |_| false), None);
     }
 
     fn dict_split(raw: &str, words: &[&str], japanese: &[&str]) -> Option<String> {
-        split(raw, false, |_| false, |w| words.contains(&w), |_| false, |k| japanese.contains(&k)).map(|s| s.display())
+        split(raw, false, |_| false, |w| words.contains(&w), |_| false, |k| japanese.contains(&k), |_| false).map(|s| s.display())
     }
 
     #[test]
@@ -324,6 +377,59 @@ mod tests {
     fn 辞書の英単語でも読みが日本語の語なら分けない() {
         assert_eq!(dict_split("madeni", &["made"], &["まで"]), None);
         assert_eq!(dict_split("madeni", &["made"], &[]).as_deref(), Some("madeに"));
+    }
+
+    /// 開発用語の一覧が words のとき (見出しは じょいんと、とどのつまり だけ) の分けた表示。
+    fn dev_split(raw: &str, words: &[&str]) -> Option<String> {
+        const READINGS: [&str; 2] = ["じょいんと", "とどのつまり"];
+        split(raw, false, |_| false, |_| false, |_| false, |k| READINGS.contains(&k), |w| words.contains(&w)).map(|s| s.display())
+    }
+
+    #[test]
+    fn 開発用語は3文字でも読みが日本語の語でも英語の頭にする() {
+        assert_eq!(dev_split("gitwo", &["git"]).as_deref(), Some("gitを"));
+        assert_eq!(dev_split("tokenga", &["token"]).as_deref(), Some("tokenが"));
+        assert_eq!(dev_split("apiwo", &["api"]).as_deref(), Some("apiを"));
+        assert_eq!(dev_split("jirasite", &["jira"]).as_deref(), Some("jiraして"));
+        assert_eq!(dev_split("uvwo", &["uv"]).as_deref(), Some("uvを"));
+        // 打鍵全体のかな読みが見出しなら (ジョイント) 頭にしない。
+        assert_eq!(dev_split("jointo", &["join"]), None);
+        // 見出しをまたぐ切り方もしない (ジョイント + マット、とどのつまり の途中)。
+        assert_eq!(dev_split("jointowo", &["join"]), None);
+        assert_eq!(dev_split("jointoha", &["join"]), None);
+        assert_eq!(dev_split("jointosuru", &["join"]), None);
+        assert_eq!(dev_split("todonotumari", &["todo"]), None);
+        // 見出しになるまで (todono〜todonotumar) は英語の頭のまま。見出しの前方一致までは見ない (todoga の とどが は とどがわ の先頭)。
+        assert_eq!(dev_split("todonotuma", &["todo"]).as_deref(), Some("todoのつま"));
+        assert_eq!(dev_split("todonotumar", &["todo"]).as_deref(), Some("todoのつまr"));
+        assert_eq!(dev_split("todonotumarinokoto", &["todo"]), None);
+        // 頭のかなと同じ長さまでの見出し (とど) では止めない。
+        assert_eq!(dev_split("todowo", &["todo"]).as_deref(), Some("todoを"));
+        assert_eq!(dev_split("todoga", &["todo"]).as_deref(), Some("todoが"));
+    }
+
+    #[test]
+    fn 一覧の語すべてが助詞の前で英語の頭になる() {
+        let words = crate::loanword::parse_words(include_str!("../resources/dev_words.txt"));
+        let lower: Vec<&str> = words.iter().map(String::as_str).filter(|w| w.bytes().all(|b| b.is_ascii_lowercase())).collect();
+        assert!(lower.len() > 300 && lower.contains(&"main"));
+        for w in &lower {
+            for (tail, kana) in [("wo", "を"), ("ga", "が"), ("de", "で"), ("nisuru", "にする")] {
+                for finished in [false, true] {
+                    // 打鍵全体は見出しでなく、辞書の英単語でも覚えた語でもなくても分ける。
+                    let s = split(&format!("{w}{tail}"), finished, |_| false, |_| false, |_| false, |_| false, |x| lower.contains(&x));
+                    assert_eq!(s.map(|s| s.display()), Some(format!("{w}{kana}")), "{w}{tail} finished={finished}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn 開発用語でも続きが助詞で始まらなければ分けない() {
+        assert_eq!(dev_split("todoke", &["todo"]), None);
+        assert_eq!(dev_split("tokei", &["toke"]), None);
+        assert_eq!(dev_split("gitai", &["git"]), None);
+        assert_eq!(dev_split("wo", &["git"]), None);
     }
 
     #[test]
@@ -345,18 +451,18 @@ mod tests {
 
     #[test]
     fn 確定済みの語も読みが日本語の語なら分けない() {
-        let s = split("madeni", false, |w| w == "made", |_| false, |_| false, |_| true);
+        let s = split("madeni", false, |w| w == "made", |_| false, |_| false, |_| true, |_| false);
         assert_eq!(s, None);
-        let s = split("donewo", false, |w| w == "done", |_| false, |_| false, |_| true);
+        let s = split("donewo", false, |w| w == "done", |_| false, |_| false, |_| true, |_| false);
         assert_eq!(s, None);
     }
 
     #[test]
     fn 確定済みの語は読みが日本語の語でなければ分ける() {
-        let s = split("madeni", false, |w| w == "made", |_| false, |_| false, |_| false);
+        let s = split("madeni", false, |w| w == "made", |_| false, |_| false, |_| false, |_| false);
         assert_eq!(s.map(|s| s.display()).as_deref(), Some("madeに"));
         // git は ぎt になり、かなにしきれないので日本語の語になりえない。
-        let s = split("gitni", false, |w| w == "git", |_| false, |_| false, |_| true);
+        let s = split("gitni", false, |w| w == "git", |_| false, |_| false, |_| true, |_| false);
         assert_eq!(s.map(|s| s.display()).as_deref(), Some("gitに"));
     }
 
@@ -368,6 +474,7 @@ mod tests {
             |_| false,
             |w| words.contains(&w),
             |w| prefixes.iter().any(|p| p.starts_with(w)),
+            |_| false,
             |_| false,
         )
         .map(|s| s.display())
@@ -394,7 +501,7 @@ mod tests {
 
     #[test]
     fn 確定したことのある語全体は分けない() {
-        let s = split("loginji", false, |w| w == "loginji", |w| w == "login", |_| false, |_| false);
+        let s = split("loginji", false, |w| w == "loginji", |w| w == "login", |_| false, |_| false, |_| false);
         assert_eq!(s, None);
     }
 
@@ -500,5 +607,69 @@ mod tests {
     fn 略語を小文字にした全体が英単語なら切らない() {
         let r = split_acronym("NO", "de", |w| w == "node");
         assert_eq!(r, None);
+    }
+
+    /// 辞書の語 words、前方一致の語 prefixes、見出しの読み readings を持つ語彙で、打ち終えたあとに分けた表示。
+    fn katakana(raw: &str, words: &[&str], prefixes: &[&str], readings: &[&str]) -> Option<String> {
+        split(raw, true, |_| false, |w| words.contains(&w), |w| prefixes.iter().any(|p| p.starts_with(w)), |k| readings.contains(&k), |_| false).map(|s| s.display())
+    }
+
+    #[test]
+    fn 頭が外来の綴りで続きがカタカナ語なら小さいかなを含んでいても分ける() {
+        let readings = ["ちぇっく", "ふぁいる", "ぺーじ"];
+        // null / build は全体がかなにしきれない (l, d が残る) が、続きがカタカナ語なら分ける。
+        assert_eq!(katakana("nulltyekkuga", &["null"], &["null", "nullable"], &readings).as_deref(), Some("nullちぇっくが"));
+        assert_eq!(katakana("nulltyekku", &["null"], &["null", "nullable"], &readings).as_deref(), Some("nullちぇっく"));
+        assert_eq!(katakana("buildfairu", &["build"], &["build", "buildfile"], &readings).as_deref(), Some("buildふぁいる"));
+        assert_eq!(katakana("loginpe-zi", &["login"], &["login"], &readings), None, "- は英語分割の対象外");
+        // 全体がかなにしきれる頭 (login) でも、小さいかなを含む続きが語なら分ける。
+        assert_eq!(katakana("loginfairu", &["login"], &["login"], &readings).as_deref(), Some("loginふぁいる"));
+    }
+
+    #[test]
+    fn 続きがカタカナ語の読みで始まらなければ小さいかなを含む続きは今までどおり分けない() {
+        let readings = ["ちぇっく", "ふぁいる"];
+        // 読みが見出しにない、または 3 かな未満 (ふぁ)。
+        assert_eq!(katakana("nulltyekku", &["null"], &["null"], &[]), None);
+        assert_eq!(katakana("loginfa", &["login"], &["login"], &["ふぁ"]), None);
+        assert_eq!(katakana("loginfa", &["login"], &["login"], &readings), None);
+        // 頭に l q v x が無い語 (test, api) は対象外。
+        assert_eq!(katakana("testkeesu", &["test"], &["test"], &["けえす"]), None);
+        assert_eq!(katakana("apifairu", &["api"], &["api"], &readings), None);
+        // 全体が英単語の綴り (nullable, buildfile) のままなら分けない。
+        assert_eq!(katakana("nullable", &["null"], &["null", "nullable"], &readings), None);
+        assert_eq!(katakana("buildfile", &["build", "file"], &["build", "buildfile"], &readings), None);
+        // 続きが読みのあとに小さいかなを残すなら分けない。
+        assert_eq!(katakana("nulltyekkufa", &["null"], &["null"], &readings), None);
+    }
+
+    #[test]
+    fn 続きの打鍵そのものが英単語か英単語の前方一致ならカタカナ語として切らない() {
+        let readings = ["ふぃれ", "ふぁれ", "ふぇあ", "ふぁん", "ふぃん", "ふぁいる"];
+        let words = ["wild", "real", "null", "ceiling", "full", "fire", "fare", "fan", "fin", "feature"];
+        let prefixes = ["wild", "real", "null", "ceiling", "full", "fire", "fare", "fan", "fin", "feature", "fi", "fil", "file"];
+        for raw in ["wildfire", "realfare", "nullfeature", "ceilingfan", "fullfin", "nullfin"] {
+            assert_eq!(katakana(raw, &words, &prefixes, &readings), None, "{raw}");
+        }
+        // 前方一致 (fil → file の途中) でも切らない。
+        assert_eq!(katakana("nullfil", &["null"], &["null", "fil"], &["ふぃる"]), None);
+        // 英単語でない続きなら切る。
+        assert_eq!(katakana("nullfairu", &["null"], &["null"], &readings).as_deref(), Some("nullふぁいる"));
+    }
+
+    #[test]
+    fn 末尾の未確定のnは打ちかけでも打ち終えても同じに判定する() {
+        // loginfan: 打ちかけの ふぁ (2 かな) と n、Enter では ふぁん (3 かな)。どちらも切るか、どちらも切らない。
+        let readings = ["ふぁん"];
+        let at = |finished: bool| split("loginfan", finished, |_| false, |w| w == "login", |w| "login".starts_with(w), |k| readings.contains(&k), |_| false).map(|s| s.display());
+        assert_eq!(at(false).is_some(), at(true).is_some());
+        assert_eq!(at(true).as_deref(), Some("loginふぁん"));
+        assert_eq!(at(false).as_deref(), Some("loginふぁn"));
+    }
+
+    #[test]
+    fn 小さいかなを含まない日本語は続きが語でも外来の綴りの全体では分けない() {
+        // 全体がかなにしきれない (null の l) とき、続きが自然なかなというだけでは null + こんにちは と分けない (今までどおり子音で終わる頭で分かれる)。
+        assert_eq!(katakana("nullkonnnichiha", &["null"], &["null"], &["こんにちは"]).as_deref(), Some("nullkonnにちは"));
     }
 }

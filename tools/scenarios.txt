@@ -836,7 +836,7 @@ api<enter>	api
 apia<enter>	あぴあ
 api-ru<space><enter>	アピール
 apiiru<enter>	あぴいる
-apito<enter>	あぴと
+apito<enter>	apiと
 kyouhaapi<enter>	きょうはあぴ
 node<enter>	ので
 nodeha<enter>	のでは
@@ -925,3 +925,90 @@ tou<space><enter>	塔
 # 控えた手前の変換は次の組成に持ち越さない (2 つ目の組成は、直前の確定が違っても同じ変換になる)。
 <live>gatuhaPCmo1<enter>gatuhaPCmo<enter>	がつはPCも1月はPCも
 <live>asitaPCmo1<enter>gatuhaPCmo<enter>	明日PCも1月はPCも
+# 開発用語 (dev_words.txt) の語は、長さにも かな読みが辞書の見出しかにもよらず、助詞などで始まる続きの前で英語の頭にする (gitwo → gitを, tokenga → tokenが)。
+# 一覧の語で始まる日本語 (todoke, tokei, gitai, jirai ...) は今までどおり。
+<live>tokenga<enter>	tokenが
+<live>apiwo<enter>	apiを
+<live>repowo<enter>	repoを
+<live>joinwo<enter>	joinを
+<live>todowo<enter>	todoを
+<live>gitwo<enter>	gitを
+<live>sedwo<enter>	sedを
+<live>intwo<enter>	intを
+<live>zigwo<enter>	zigを
+<live>ragwo<enter>	ragを
+<live>ioswo<enter>	iosを
+<live>luawo<enter>	luaを
+<live>jirawo<enter>	jiraを
+<live>gitde<enter>	gitで
+<live>mainni<enter>	mainに
+<live>mainnisuru<enter>	mainにする
+<live>todoke<enter>	届け
+<live>todoita<enter>	届いた
+<live>todomaru<enter>	止まる
+<live>tokei<enter>	時計
+<live>tokenai<enter>	溶けない
+<live>repo-to<enter>	レポート
+<live>apa-to<enter>	アパート
+<live>joinn<enter>	ジョイン
+<live>gitai<enter>	擬態
+<live>intai<enter>	引退
+<live>sedai<enter>	世代
+<live>ragu<enter>	らぐ
+<live>zigoku<enter>	地獄
+<live>ioso<enter>	異遅
+<live>jirai<enter>	地雷
+<live>jirasu<enter>	焦らす
+<live>mainiti<enter>	毎日
+<live>mainichi<enter>	毎日
+<live>maininn<enter>	毎任
+<live>mainasu<enter>	マイナス
+tokenga<space><enter>	tokenが
+tokenwo<space><enter>	tokenを
+gitwo<enter>	gitを
+# 英単語のあとにカタカナ語が続く: 頭に l q v x を含む語 (null, build) のあとで、続きがカタカナ語の読み (ちぇっく, ふぁいる) で始まれば、小さいかなを含んでいても切る (nulltyekkuga → nullチェックが)。
+# 全体が英単語の綴り (nullable, buildfile) や、頭に l q v x の無い語 (testkeesu) は今までどおり。
+<live>nulltyekkuga<enter>	nullチェックが
+<live>nulltyekku<enter>	nullチェック
+nulltyekkuga<space><enter>	nullチェックが
+nulltyekku<space><enter>	nullチェック
+<live>buildfairu<enter>	buildファイル
+<live>buildfairuwo<enter>	buildファイルを
+<live>nullfairu<enter>	nullファイル
+<live>nullable<enter>	nullable
+<live>buildfile<enter>	buildfile
+<live>loginpage<enter>	loginパげ
+<live>fileformat<enter>	fileformat
+<live>testkeesu<enter>	testkeesu
+<live>apikii<enter>	アピ聞い
+<live>loginjinihiraku<enter>	login耳に開く
+<live>loginfa<enter>	ォ銀ふぁ
+<live>nullkonnnichiha<enter>	nullkonn日は
+# 打鍵全体のかな読みが辞書の見出しなら、一覧の語 (join) でも頭にしない (jointo = ジョイント)。
+<live>jointo<enter>	ジョイント
+# 一覧の語は、打鍵全体のかなの先頭が頭のかなより長い辞書の見出しになるなら頭にしない (jointo + wo は ジョイントを、todonotumari は とどのつまり)。見出しの前方一致までは見ない (todoga は todoが)。
+# 続きの打鍵そのものが英単語か英単語の前方一致なら、カタカナ語として切らない (wildfire, ceilingfan)。nulltyekku, buildfairu は切れる。
+<live>jointo<enter>	ジョイント
+<live>jointowo<enter>	ジョイントを
+<live>jointoha<enter>	ジョイントは
+<live>jointosuru<enter>	ジョイントする
+<live>jointomatto<enter>	ジョイントマット
+<live>todonotumari<enter>	とどのつまり
+<live>todonotumarinokoto<enter>	とどのつまりのこと
+<live>repowodasu<enter>	repoを出す
+<live>todoga<enter>	todoが
+<live>jirasite<enter>	焦らして
+<live>wildfire<enter>	wildfire
+<live>quickfire<enter>	quickfire
+<live>localfire<enter>	localfire
+<live>realfare<enter>	realfare
+<live>nullfeature<enter>	nullfeature
+<live>ceilingfan<enter>	ceilingfan
+<live>fullfin<enter>	fullfin
+<live>nullfin<enter>	nullfin
+<live>localfin<enter>	localfin
+<live>nulltyekku<enter>	nullチェック
+<live>nulltyekkuga<enter>	nullチェックが
+<live>buildfairu<enter>	buildファイル
+wildfire<space><enter>	wildfire \n
+ceilingfan<space><enter>	ceilingfan \n
