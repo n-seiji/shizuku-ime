@@ -97,7 +97,8 @@ def to_keys(kana: str) -> str:
             continue
         if ch == "っ":
             following = to_keys(text[i + 1 : i + 3])[:1] if i + 1 < len(text) else ""
-            out.append(following if following and following not in "aiueon-" else "xtu")
+            doubles = following.isascii() and following.isalpha()
+            out.append(following if doubles and following not in "aiueon" else "xtu")
         elif ch in _BASE:
             out.append(_BASE[ch])
         elif ch in _PUNCT:
@@ -105,7 +106,7 @@ def to_keys(kana: str) -> str:
         elif ord(ch) < 128:
             out.append(_ASCII_KEYS.get(ch, ch))
         else:
-            raise ValueError(f"no romaji for {ch!r} in {kana!r}")
+            raise ValueError(f"no romaji for U+{ord(ch):04X} at position {i}")
         i += 1
     return "".join(out)
 

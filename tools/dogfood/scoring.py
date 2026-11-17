@@ -43,7 +43,9 @@ _DIGITS = {
     for c in cs
 }
 _UNITS = {"十": 10, "百": 100, "千": 1000}
-_NUMBER_RUN = re.compile("[〇零一二三四五六七八九十百千万]+")
+_BIG_UNITS = {"万": 10**4, "億": 10**8}
+_NUMBER_RUN = re.compile("[0-9〇零一二三四五六七八九十百千万億]+")
+_NUMBER_TOKEN = re.compile("[0-9]+|[〇零一二三四五六七八九]|[十百千万億]")
 _FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
 
 
@@ -67,30 +69,34 @@ class Probe(NamedTuple):
     )
 
 
-def _kanji_number(run: str) -> str | None:
-    if not any(c in _UNITS or c == "万" for c in run):
-        return "".join(str(_DIGITS[c]) for c in run)
-    total = block = 0
-    digit: int | None = None
-    for c in run:
-        if c in _DIGITS:
-            if digit is not None:
-                return None
-            digit = _DIGITS[c]
-        elif c in _UNITS:
-            block += (1 if digit is None else digit) * _UNITS[c]
-            digit = None
+def _number_value(run: str) -> str | None:
+    """The value of a run of digits and 十 百 千 万 億 as Arabic digits, None when it is not a
+    number (two digit groups side by side next to a unit). Arabic digits may stand where a
+    kanji digit would: 5万, 1万2千, 3億5千万. Used only to compare, never to rewrite text."""
+    if not any(c in _UNITS or c in _BIG_UNITS for c in run):
+        return "".join(c if c.isascii() else str(_DIGITS[c]) for c in run)
+    total = small = 0
+    pending: int | None = None  # a digit group waiting for its unit
+    for token in _NUMBER_TOKEN.findall(run):
+        if token in _UNITS:
+            small += (1 if pending is None else pending) * _UNITS[token]
+            pending = None
+        elif token in _BIG_UNITS:
+            total += ((small + (pending or 0)) or 1) * _BIG_UNITS[token]
+            small, pending = 0, None
+        elif pending is not None:
+            return None
         else:
-            total += (block + (digit or 0) or 1) * 10000
-            block, digit = 0, None
-    return str(total + block + (digit or 0))
+            pending = int(token) if token.isascii() else _DIGITS[token]
+    return str(total + small + (pending or 0))
 
 
 def normalize_numbers(text: str) -> str:
-    """Numerals as Arabic digits: 十時 -> 10時, 二〇二六 -> 2026, ３ -> 3."""
+    """Numerals as Arabic digits, for comparing: 十時 -> 10時, 二〇二六 -> 2026, ３ -> 3,
+    五万円 and 5万円 -> 50000円."""
 
     def replace(match: re.Match[str]) -> str:
-        value = _kanji_number(match.group(0))
+        value = _number_value(match.group(0))
         return match.group(0) if value is None else value
 
     return _NUMBER_RUN.sub(replace, text.translate(_FULLWIDTH_DIGITS))

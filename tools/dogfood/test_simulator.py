@@ -216,3 +216,40 @@ def test_judge_off_must_really_run_without_the_judge_and_a_lost_dictionary_stops
     monkeypatch.setenv("FAKE_MODE", "dictionary_lost")
     with pytest.raises(SimulatorError, match="dictionary could not be opened"):
         preflight(off)
+
+
+SECRET = "ひみつのぶんしょう"
+
+
+def test_parse_errors_name_the_line_but_never_quote_the_output() -> None:
+    with pytest.raises(SimulatorError, match="line 9") as err:
+        parse_verbose(REAL_OUTPUT + SECRET + "\n", "<live>ka<space><enter>")
+    assert SECRET not in str(err.value)
+    out = f'     <live>{SECRET}<enter>  =>  "か"\n'
+    with pytest.raises(SimulatorError, match="scenario 1") as err:
+        parse_file_output(out, ["<live>kb<enter>"])
+    assert SECRET not in str(err.value)
+    garbled = "     <live>kb<enter>  =>  " + SECRET + "\n"
+    with pytest.raises(SimulatorError, match="scenario 1") as err:
+        parse_file_output(garbled, ["<live>kb<enter>"])
+    assert SECRET not in str(err.value)
+
+
+def test_a_failing_simulator_is_reported_by_status_only(
+    fake: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    def failed(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], 3, "", f"panic: {SECRET}")
+
+    monkeypatch.setattr(simulator, "_invoke", failed)
+    config = make_config("off", os.environ, REPO)
+    for call in (
+        lambda: simulate_keys(config, "<live>ka<enter>"),
+        lambda: simulate_batch(config, ["<live>ka<enter>"]),
+    ):
+        with pytest.raises(SimulatorError, match="status 3") as err:
+            call()
+        assert SECRET not in str(err.value)

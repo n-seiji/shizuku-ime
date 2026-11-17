@@ -18,6 +18,7 @@ existed read as 0.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -68,12 +69,28 @@ def dogfood_dir(environ: Mapping[str, str]) -> Path:
     return Path(environ.get("SHIZUKU_DOGFOOD_DIR") or default)
 
 
+_ESCAPES = {"\\": "\\\\", "\n": "\\n", "\t": "\\t", "\r": "\\r"}
+_UNESCAPES = {"\\": "\\", "n": "\n", "t": "\t", "r": "\r"}
+_ESCAPED = re.compile(r"\\(.)", re.DOTALL)
+
+
 def _escape(text: str) -> str:
-    return text.replace("\n", "⏎").replace("\t", "⇥")
+    """Backslash, newline, tab and carriage return as `\\`, `\\n`, `\\t`, `\\r`; reversible."""
+    return "".join(_ESCAPES.get(c, c) for c in text)
 
 
 def _unescape(text: str) -> str:
-    return text.replace("⏎", "\n").replace("⇥", "\t")
+    return _ESCAPED.sub(lambda m: _UNESCAPES.get(m[1], m[0]), text)
+
+
+def _write_atomically(path: Path, text: str) -> None:
+    """Write beside the file and rename, so the file exists only when it is whole."""
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def write_table(
@@ -81,11 +98,14 @@ def write_table(
 ) -> None:
     lines = ["\t".join(columns)]
     lines += ["\t".join(_escape(str(v)) for v in row) for row in rows]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _write_atomically(path, "\n".join(lines) + "\n")
 
 
 def read_table(path: Path) -> list[dict[str, str]]:
-    lines = path.read_text(encoding="utf-8").splitlines()
+    # split on "\n" only: str.splitlines also cuts at U+2028, \x0b, \x85 and so on
+    lines = path.read_text(encoding="utf-8").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
     if not lines:
         raise ValueError(f"{path} is empty")
     header = lines[0].split("\t")
@@ -119,12 +139,13 @@ def read_clauses(path: Path) -> list[ClauseRow]:
 
 
 def write_summary(path: Path, items: list[tuple[str, str]]) -> None:
-    path.write_text("".join(f"{k}\t{v}\n" for k, v in items), encoding="utf-8")
+    _write_atomically(path, "".join(f"{k}\t{_escape(v)}\n" for k, v in items))
 
 
 def read_summary(path: Path) -> dict[str, str]:
-    lines = path.read_text(encoding="utf-8").splitlines()
-    return dict(line.split("\t", 1) for line in lines if "\t" in line)
+    lines = path.read_text(encoding="utf-8").split("\n")
+    pairs = (line.split("\t", 1) for line in lines if "\t" in line)
+    return {k: _unescape(v) for k, v in pairs}
 
 
 @dataclass(frozen=True)
@@ -223,22 +244,32 @@ def compare(old: Sequence[ClauseRow], new: Sequence[ClauseRow]) -> Comparison:
 
 
 def _show_pairs(
-    title: str, pairs: tuple[tuple[ClauseRow, ClauseRow], ...], limit: int
+    title: str,
+    pairs: tuple[tuple[ClauseRow, ClauseRow], ...],
+    limit: int,
+    show_text: bool,
 ) -> list[str]:
     if not pairs:
         return []
     lines = [f"{title} ({len(pairs)}):"]
     for old, new in pairs[:limit]:
-        lines.append(f"  para {new.para}.{new.sent}.{new.clause}  want {new.want}")
-        lines.append(f"      was {old.got!r} ({old.status}, score {old.score})")
-        lines.append(f"      now {new.got!r} ({new.status}, score {new.score})")
+        where = f"  para {new.para}.{new.sent}.{new.clause}"
+        lines.append(f"{where}  want {new.want}" if show_text else where)
+        was = f"{old.got!r} " if show_text else ""
+        now = f"{new.got!r} " if show_text else ""
+        lines.append(f"      was {was}({old.status}, score {old.score})")
+        lines.append(f"      now {now}({new.status}, score {new.score})")
     if len(pairs) > limit:
         lines.append(f"  ... {len(pairs) - limit} more")
     return lines
 
 
-def format_comparison(c: Comparison, limit: int = 20) -> list[str]:
-    """The report shared by run.py and cmp_runs.py."""
+def format_comparison(
+    c: Comparison, limit: int = 20, show_text: bool = False
+) -> list[str]:
+    """The report shared by run.py and cmp_runs.py. The clauses are named by para.sent.clause,
+    status and score; the wanted and committed text (which may be private) only with show_text.
+    """
     delta = c.new_score - c.old_score
     lines = [
         f"compared clauses: {c.shared}  score {c.old_score} -> {c.new_score} ({delta:+d})",
@@ -248,7 +279,9 @@ def format_comparison(c: Comparison, limit: int = 20) -> list[str]:
             f"  match<->notation {len(c.drifted)}  new {len(c.added)}  gone {len(c.removed)}"
         ),
     ]
-    lines += _show_pairs("fixed", c.fixed, limit)
-    lines += _show_pairs("broken", c.broken, limit)
-    lines += _show_pairs("match <-> notation (score stays 0)", c.drifted, limit)
+    lines += _show_pairs("fixed", c.fixed, limit, show_text)
+    lines += _show_pairs("broken", c.broken, limit, show_text)
+    lines += _show_pairs(
+        "match <-> notation (score stays 0)", c.drifted, limit, show_text
+    )
     return lines

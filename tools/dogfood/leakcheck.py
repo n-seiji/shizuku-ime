@@ -9,8 +9,9 @@
                                                [--public FILE]... [--allow FILE] TARGET...
 
 The private lines are $SHIZUKU_DOGFOOD_DIR/private/real_lines.txt unless --private says
-otherwise. When that default file does not exist there is nothing to check against, which is
-said out loud and succeeds. A file named on the command line (--private, --private-keys,
+otherwise. When that default file does not exist and no --private-keys table is given there is
+nothing to check against, which is said out loud and succeeds; with a --private-keys table the
+typed keys alone are checked. A file named on the command line (--private, --private-keys,
 --public, --allow, a TARGET) that does not exist is an error (exit 2): a gate that was asked to
 look somewhere must not pass because the place is missing. Exit 1 is only for a hit.
 
@@ -85,8 +86,10 @@ def explicit_paths(args: argparse.Namespace) -> list[Path]:
     return [p for p in named if p is not None]
 
 
-def check(args: argparse.Namespace, private_path: Path) -> int:
-    lines = private_path.read_text(encoding="utf-8").splitlines()
+def check(args: argparse.Namespace, private_path: Path | None) -> int:
+    lines = (
+        private_path.read_text(encoding="utf-8").splitlines() if private_path else []
+    )
     private = [
         (n, s.strip()) for n, s in enumerate(lines, 1) if len(s.strip()) >= MIN_LINE
     ]
@@ -134,10 +137,12 @@ def main(argv: list[str] | None = None) -> int:
         args.private or runstore.dogfood_dir(os.environ) / "private" / "real_lines.txt"
     )
     if not private_path.is_file():
-        print(
-            "leakcheck: nothing to check against (no private lines file at the default place); passed"
-        )
-        return 0
+        if not args.private_keys:
+            print(
+                "leakcheck: nothing to check against (no private lines file at the default place); passed"
+            )
+            return 0
+        private_path = None  # the typed keys alone are still checked
     if not args.targets:
         ap.error("no TARGET files given")
     try:

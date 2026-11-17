@@ -41,6 +41,45 @@ def test_numerals_become_arabic_digits(text: str, normalized: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "a, b",
+    [
+        ("五万円", "5万円"),
+        ("二十日", "20日"),
+        ("三百円", "300円"),
+        ("二千五百", "2500"),
+        ("1万2千", "一万二千"),
+        ("1万2千円", "12000円"),
+        ("三億五千万円", "3億5千万円"),
+        ("3億5千万円", "350000000円"),
+        ("十分", "10分"),
+    ],
+)
+def test_numbers_mixing_units_and_digits_are_the_same_notation(a: str, b: str) -> None:
+    assert is_notation_variant(a, b)
+    assert is_notation_variant(b, a)
+
+
+@pytest.mark.parametrize(
+    "a, b",
+    [
+        ("今日", "きょう"),
+        ("一番", "いちばん"),
+        ("十分", "じゅうぶん"),
+        ("5万円", "6万円"),
+        ("1万2千", "一万三千"),
+        ("二十日", "21日"),
+    ],
+)
+def test_words_and_different_numbers_are_not_notation(a: str, b: str) -> None:
+    assert not is_notation_variant(a, b)
+
+
+def test_normalizing_is_only_for_comparing_and_leaves_a_plain_digit_run_alone() -> None:
+    assert normalize_numbers("2026年") == "2026年"
+    assert normalize_numbers("5万円") == "50000円"
+
+
+@pytest.mark.parametrize(
     "got, gold",
     [
         ("明日は10時から。", "明日は十時から。"),

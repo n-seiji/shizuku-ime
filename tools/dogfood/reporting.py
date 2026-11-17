@@ -83,7 +83,11 @@ def write_run(
 
 
 def _comparison_lines(
-    s: dict[str, str], rows: list[ClauseRow], baseline: Baseline | None, limit: int
+    s: dict[str, str],
+    rows: list[ClauseRow],
+    baseline: Baseline | None,
+    limit: int,
+    show_text: bool,
 ) -> list[str]:
     if baseline is None:
         return ["previous run: none"]
@@ -96,7 +100,7 @@ def _comparison_lines(
     comparison = runstore.compare(baseline.clauses, rows)
     return [
         f"previous run: {baseline.name}{note}",
-        *runstore.format_comparison(comparison, limit),
+        *runstore.format_comparison(comparison, limit, show_text),
     ]
 
 
@@ -106,6 +110,7 @@ def report_lines(
     rows: list[ClauseRow],
     baseline: Baseline | None,
     limit: int,
+    show_text: bool = False,
 ) -> list[str]:
     s = dict(items)
     return [
@@ -125,5 +130,5 @@ def report_lines(
             f"check failures {s['check_failures']}"
         ),
         f"Space queries that cut a chunk (their rank is an estimate): {s['cut_queries']}",
-        *_comparison_lines(s, rows, baseline, limit),
+        *_comparison_lines(s, rows, baseline, limit, show_text),
     ]

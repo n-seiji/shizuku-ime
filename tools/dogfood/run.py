@@ -8,7 +8,8 @@ judge) and score what comes out as extra keystrokes per clause.
 
     mise run dogfood                                  # tools/dogfood/seed.tsv, judge required
     uv run --script tools/dogfood/run.py INPUT.tsv [--judge required|off] [--check-preedit]
-                                         [--against RUN] [--show N] [--print-keys]
+                                         [--against RUN] [--show N] [--text]
+                                         [--print-keys]
 
 Input: a TSV, one paragraph per line, six tab-separated columns
 
@@ -280,6 +281,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--show", type=int, default=20, help="most fixed/broken clauses to list"
     )
     ap.add_argument(
+        "--text",
+        action="store_true",
+        help="also print the wanted and committed text of the fixed/broken clauses",
+    )
+    ap.add_argument(
         "--print-keys",
         action="store_true",
         help="print each key line and stop (no simulator)",
@@ -317,7 +323,7 @@ def execute(
     run_dir = runstore.create_run_dir(runs_dir, commit)
     write_run(run_dir, outcomes, items)
     rows = [r for o in outcomes for r in o.rows]
-    print("\n".join(report_lines(run_dir, items, rows, baseline, args.show)))
+    print("\n".join(report_lines(run_dir, items, rows, baseline, args.show, args.text)))
 
 
 def main(argv: list[str] | None = None) -> int:

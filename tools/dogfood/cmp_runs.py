@@ -5,7 +5,7 @@
 # ///
 """Compare two dogfood runs clause by clause: the score change, and the clauses fixed or broken.
 
-    uv run --script tools/dogfood/cmp_runs.py OLD NEW [--show N]
+    uv run --script tools/dogfood/cmp_runs.py OLD NEW [--show N] [--text]
 
 OLD and NEW are run directories, or run names under $SHIZUKU_DOGFOOD_DIR/runs/ (for example
 `cc2601e-001`). Clauses are matched by (key line, sentence, clause), so runs of different builds
@@ -32,6 +32,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--show", type=int, default=20, help="most fixed/broken clauses to list"
     )
+    ap.add_argument(
+        "--text",
+        action="store_true",
+        help="also print the wanted and committed text of the clauses",
+    )
     args = ap.parse_args(argv)
     runs_dir = runstore.dogfood_dir(os.environ) / "runs"
     try:
@@ -45,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         log.error("cmp_runs: %s", err)
         return 2
     print(f"old: {old_dir.name}\nnew: {new_dir.name}")
-    print("\n".join(runstore.format_comparison(comparison, args.show)))
+    print("\n".join(runstore.format_comparison(comparison, args.show, args.text)))
     return 0
 
 

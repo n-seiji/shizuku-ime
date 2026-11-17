@@ -19,7 +19,10 @@ TWO_CLAUSES = (
 
 
 def run_dirs(fake: SimpleNamespace) -> list[str]:
-    return sorted(p.name for p in fake.runs.iterdir()) if fake.runs.exists() else []
+    if not fake.runs.exists():
+        return []
+    by_number = sorted(fake.runs.iterdir(), key=lambda p: int(p.name.rsplit("-", 1)[1]))
+    return [p.name for p in by_number]
 
 
 def clauses_of(fake: SimpleNamespace) -> list[runstore.ClauseRow]:

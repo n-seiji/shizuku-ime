@@ -273,7 +273,7 @@ def parse_verbose(stdout: str, keys: str) -> VerboseRun:
     raw: list[_RawStep] = []
     final: str | None = None
     composing, stale, wysiwyg = "", False, False
-    for line in stdout.splitlines():
+    for number, line in enumerate(stdout.splitlines(), 1):
         match = _STEP.match(line)
         if match:
             marked, committed = parse_rust_string(match["marked"]), parse_rust_string(
@@ -293,7 +293,7 @@ def parse_verbose(stdout: str, keys: str) -> VerboseRun:
         elif line[:1].isspace() and raw and line.strip().startswith("1."):
             raw[-1] = replace(raw[-1], candidate_line=line)
         else:
-            raise SimulatorError(f"unexpected simulator output: {line[:60]!r}")
+            raise SimulatorError(f"unexpected simulator output at line {number}")
     tokens = split_steps(keys)
     if len(raw) != len(tokens):
         raise SimulatorError(
@@ -325,18 +325,18 @@ def parse_file_output(stdout: str, key_lines: list[str]) -> BatchRun:
             f"simulator printed {len(lines)} result lines for {len(key_lines)} scenarios"
         )
     rows: list[FileRow] = []
-    for line, keys in zip(lines, key_lines):
+    for number, (line, keys) in enumerate(zip(lines, key_lines), 1):
         verdict = line[:4]
         head = f"{verdict} {keys}  =>  "
         if verdict not in ("    ", "STAL", "WYSI") or not line.startswith(head):
             raise SimulatorError(
-                f"a result line does not belong to its scenario ({line[:40]!r})"
+                f"the result line of scenario {number} does not belong to it"
             )
         shown = _FILE_SHOWN.match(line[len(head) :])
         if shown is None or (
             shown["rest"] and not shown["rest"].startswith("   after ")
         ):
-            raise SimulatorError(f"cannot parse a result line ({line[:40]!r})")
+            raise SimulatorError(f"cannot parse the result line of scenario {number}")
         marked = parse_rust_string(shown["marked"]) if shown["marked"] else ""
         rows.append(FileRow(verdict.strip(), parse_rust_string(shown["shown"]), marked))
     return BatchRun(tuple(rows), judge_n)
@@ -347,9 +347,7 @@ def simulate_keys(
 ) -> VerboseRun:
     proc = _invoke(config, "--simulate", keys, check_preedit, timing)
     if proc.returncode != 0:
-        raise SimulatorError(
-            f"simulator exited with status {proc.returncode}: {proc.stderr.strip()[-200:]}"
-        )
+        raise SimulatorError(f"simulator exited with status {proc.returncode}")
     return parse_verbose(proc.stdout, keys)
 
 
@@ -370,9 +368,7 @@ def simulate_batch(
         path.write_text("\n".join(key_lines) + "\n", encoding="utf-8")
         proc = _invoke(config, "--simulate-file", str(path), check_preedit, timing)
     if proc.returncode not in (0, 1):  # 1 = a --check-preedit scenario failed
-        raise SimulatorError(
-            f"simulator exited with status {proc.returncode}: {proc.stderr.strip()[-200:]}"
-        )
+        raise SimulatorError(f"simulator exited with status {proc.returncode}")
     return parse_file_output(proc.stdout, key_lines)
 
 

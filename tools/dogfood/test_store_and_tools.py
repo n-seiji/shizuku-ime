@@ -1,11 +1,13 @@
 """Run files, comparison of runs, cmp_runs.py and leakcheck.py."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import cmp_runs
 import leakcheck
 import pytest
 import runstore
+import testkit
 from runstore import ClauseRow
 
 
@@ -81,7 +83,7 @@ def test_a_clause_that_moves_between_match_and_notation_is_listed_though_its_sco
     drifted = row(1, 0, got="10時")._replace(status="notation")
     c = runstore.compare([row(1, 0, got="十時")], [drifted, row(2, 0)])
     assert (len(c.drifted), len(c.fixed), len(c.broken)) == (1, 0, 0)
-    report = "\n".join(runstore.format_comparison(c))
+    report = "\n".join(runstore.format_comparison(c, show_text=True))
     assert "match<->notation 1" in report and "now '10時' (notation, score 0)" in report
 
 
@@ -102,7 +104,11 @@ def test_cmp_runs_prints_the_fixed_and_broken_clauses(
     )
     assert cmp_runs.main(["aaaaaaa-001", "bbbbbbb-002"]) == 0
     out = capsys.readouterr().out
-    assert "fixed 1  broken 1" in out and "was 'old'" in out and "now 'bad'" in out
+    assert "fixed 1  broken 1" in out and "para 1.1.1" in out and "para 1.1.2" in out
+    assert "'old'" not in out and "'bad'" not in out and "あ。" not in out
+    assert cmp_runs.main(["aaaaaaa-001", "bbbbbbb-002", "--text"]) == 0
+    out = capsys.readouterr().out
+    assert "was 'old'" in out and "now 'bad'" in out
     assert cmp_runs.main(["aaaaaaa-001", "nowhere-009"]) == 2
 
 
@@ -220,3 +226,91 @@ def test_an_empty_clauses_file_is_a_value_error_not_an_index_error(
     (tmp_path / "clauses.tsv").write_text("", encoding="utf-8")
     with pytest.raises(ValueError, match="is empty"):
         runstore.read_clauses(tmp_path / "clauses.tsv")
+
+
+def test_the_comparison_names_clauses_without_their_text_unless_asked() -> None:
+    c = runstore.compare([row(1, 5, got="secret")], [row(1, 0, got="other")])
+    quiet = "\n".join(runstore.format_comparison(c))
+    assert "para 1.1.1" in quiet and "score 5" in quiet and "score 0" in quiet
+    assert "secret" not in quiet and "other" not in quiet and "あ。" not in quiet
+    loud = "\n".join(runstore.format_comparison(c, show_text=True))
+    assert "'secret'" in loud and "'other'" in loud and "あ。" in loud
+
+
+def test_text_with_the_escape_marks_themselves_round_trips(tmp_path: Path) -> None:
+    for text in ["a⏎b⇥c", "\\n", "\\", "x\\\ny", "\n\t\r", "end\\", "⏎\n⇥\t"]:
+        original = [row(1, 3, got=text)]
+        write_run(tmp_path / "r", original)
+        assert runstore.read_clauses(tmp_path / "r" / "clauses.tsv") == original
+        (tmp_path / "r" / "clauses.tsv").unlink()
+        (tmp_path / "r" / "summary.tsv").unlink()
+        (tmp_path / "r").rmdir()
+
+
+def test_unusual_line_separators_in_text_do_not_split_a_row(tmp_path: Path) -> None:
+    original = [row(1, 3, got="a\u2028b\x0bc\x85d")]
+    write_run(tmp_path / "r", original)
+    assert runstore.read_clauses(tmp_path / "r" / "clauses.tsv") == original
+
+
+class _Unprintable:
+    def __str__(self) -> str:
+        raise RuntimeError("boom")
+
+
+def test_a_table_that_fails_midway_leaves_no_file_and_keeps_the_old_one(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "clauses.tsv"
+    with pytest.raises(RuntimeError):
+        runstore.write_table(path, ("a",), [(_Unprintable(),)])
+    assert list(tmp_path.iterdir()) == []
+    runstore.write_table(path, ("a",), [("old",)])
+    with pytest.raises(RuntimeError):
+        runstore.write_table(path, ("a",), [("new",), (_Unprintable(),)])
+    assert [r["a"] for r in runstore.read_table(path)] == ["old"]
+    assert [p.name for p in tmp_path.iterdir()] == ["clauses.tsv"]
+
+
+def test_runs_are_ordered_by_their_number_not_by_the_commit_hash(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    for name in ("ccccccc-001", "aaaaaaa-002", "bbbbbbb-1000", "ddddddd-999"):
+        (runs / name).mkdir(parents=True)
+        touch_clauses(runs / name)
+    assert [p.name for _, p in runstore.list_runs(runs)] == [
+        "ccccccc-001",
+        "aaaaaaa-002",
+        "ddddddd-999",
+        "bbbbbbb-1000",
+    ]
+    assert runstore.previous_run(runs) == runs / "bbbbbbb-1000"
+    assert testkit.run_dirs(SimpleNamespace(runs=runs)) == [
+        "ccccccc-001",
+        "aaaaaaa-002",
+        "ddddddd-999",
+        "bbbbbbb-1000",
+    ]
+
+
+def test_leakcheck_checks_private_keys_even_without_the_default_lines_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(
+        "SHIZUKU_DOGFOOD_DIR", str(tmp_path)
+    )  # no private/real_lines.txt
+    table = tmp_path / "paragraphs.tsv"
+    runstore.write_table(
+        table,
+        runstore.PARAGRAPH_COLUMNS,
+        [(1, "whole", "", "x", "<live>asitanokaigiha<enter>")],
+    )
+    leaking, clean = tmp_path / "a.md", tmp_path / "b.md"
+    leaking.write_text("see asitanokaigiha here", encoding="utf-8")
+    clean.write_text("nothing here", encoding="utf-8")
+    assert leakcheck.main(["--private-keys", str(table), str(leaking)]) == 1
+    assert "1 typed key line(s)" in capsys.readouterr().out
+    assert leakcheck.main(["--private-keys", str(table), str(clean)]) == 0
+    assert leakcheck.main([str(leaking)]) == 0  # nothing at all to check against
+    assert "nothing to check against" in capsys.readouterr().out

@@ -45,6 +45,10 @@ def one(text: str) -> Paragraph:
         ("Rust", "Rust"),
         ("a<b", "a<lt>b"),
         ("？！、", "?!,"),
+        ("エッ？", "extu?"),  # っ before a mark is a small っ, not a doubled mark
+        ("ッ。", "xtu."),
+        ("ッ", "xtu"),
+        ("ッパ", "ppa"),
     ],
 )
 def test_to_keys(kana: str, keys: str) -> None:
@@ -54,6 +58,14 @@ def test_to_keys(kana: str, keys: str) -> None:
 def test_to_keys_rejects_kanji_instead_of_skipping_it() -> None:
     with pytest.raises(ValueError):
         to_keys("漢字")
+
+
+def test_the_error_for_an_untypable_character_leaves_the_text_out() -> None:
+    with pytest.raises(ValueError) as err:
+        to_keys("ひみつ漢字")
+    message = str(err.value)
+    assert "U+6F22" in message and "position 3" in message
+    assert "漢" not in message and "ひみつ" not in message
 
 
 def test_key_count_counts_a_token_as_one_key() -> None:
