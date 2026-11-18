@@ -69,6 +69,10 @@ pub trait CandidateEngine {
     fn convert_after_head(&mut self, revision: u64, hiragana: &str) -> Vec<String> {
         self.convert(revision, hiragana)
     }
+    /// `convert_after_head` と同じだが、読みの左が英単語で、読みがその直後から始まる (merge + した)。英単語を名詞と見なして変換できる engine は、これを上書きする。
+    fn convert_after_english_head(&mut self, revision: u64, hiragana: &str) -> Vec<String> {
+        self.convert_after_head(revision, hiragana)
+    }
     fn cancel(&mut self);
     /// 変換の文脈 (アプリで直前に確定した文字列。空なら文脈なし) と、その最後の語の右の連接 ID (`tail`。無ければ文頭から変換する)、そのアプリが英語を打つアプリか。キーごとに、変換する前に渡される。
     fn set_context(&mut self, _context: &str, _tail: Option<Rcid>, _english_app: bool) {}
@@ -291,6 +295,22 @@ impl Segment {
     }
 }
 
+/// 変換する読み (tail) の左に何があるか。
+#[derive(Clone, Copy)]
+enum Left {
+    /// 組成の先頭。直前に確定した語の続き (`CandidateEngine::convert`)。
+    Start,
+    /// 組成の別の部分 (固定した語、英単語以外の頭)。文頭から (`convert_after_head`)。
+    Head,
+    /// 英単語。読みはその直後から始まる (`convert_after_english_head`)。
+    EnglishHead,
+}
+
+/// ひらがな (長音を含む)。
+fn is_kana_char(c: char) -> bool {
+    matches!(c, '\u{3041}'..='\u{3096}' | 'ー')
+}
+
 const PUNCT_KANA: [&str; 6] = ["。", "、", "！", "？", "「", "」"];
 /// 1 回の変換で入れる絵文字の上限
 const EMOJI_LIMIT: usize = 5;
@@ -483,8 +503,8 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
     pub fn commit_preview(&self) -> String {
         match self.settle(self.is_typing_english()) {
             Settle::Mixed(split) => match self.live_split_text(&split) {
-                Some(text) => text.to_string(),
-                None => format!("{}{}", split.head, split.tail_kana()),
+                Some(text) => text.to_string() + &split.pending,
+                None => format!("{}{}{}", split.head, split.tail_kana(), split.pending),
             },
             Settle::Dangling => self.raw(),
             Settle::Unchanged if self.phase() == Phase::Dangling => self.raw(),
@@ -676,11 +696,13 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
 
     /// 読みの `->` を `>` としてエンジンに渡して変換し、返った候補の同じ位置の `>` を `->` に戻す。
     /// エンジンに `-` を見せないので、学習や順位が矢印のために崩れない。
-    /// `after_head` は、読みの左に組成の別の部分があるとき (`CandidateEngine::convert_after_head`)。
-    fn convert_with_arrows(&mut self, reading: &str, after_head: bool) -> Vec<String> {
+    /// `left` は読みの左の様子 (`Left`)。
+    fn convert_with_arrows(&mut self, reading: &str, left: Left) -> Vec<String> {
         let generation = self.reading.generation;
-        let convert = |engine: &mut E, reading: &str| {
-            if after_head { engine.convert_after_head(generation, reading) } else { engine.convert(generation, reading) }
+        let convert = |engine: &mut E, reading: &str| match left {
+            Left::Start => engine.convert(generation, reading),
+            Left::Head => engine.convert_after_head(generation, reading),
+            Left::EnglishHead => engine.convert_after_english_head(generation, reading),
         };
         if !reading.contains("->") {
             return convert(&mut self.engine, reading);
@@ -780,9 +802,10 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
             return Settle::Dangling;
         }
         // 見えている分割に未確定のローマ字が付いている間 (artifactwok の artifactをk) は、その表示のまま確定する。
+        // 変換するのは読み (pending を含めない) だけで、pending は変換結果のあとにそのまま付く (`fix_english_split`、下線 (`preedit`) と同じ)。
         // n だけは対象外: 確定で ん になり、分割の読みに入る (kousin の n)。
         if let Some(split) = self.english_split(false).filter(|s| !s.pending.is_empty() && s.pending != PENDING_N) {
-            return Settle::Mixed(split.pending_as_kana());
+            return Settle::Mixed(split);
         }
         if let Some(split) = self.english_split(true) {
             return Settle::Mixed(split);
@@ -878,9 +901,16 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
     /// 英単語 head のあとに、かな tail をエンジンで変換したものを付けた候補列。head が空なら tail の変換結果だけ。
     /// tail が組成の先頭でない (head がある、先頭が固定されている) ときは、直前に確定した語の続きではないので、文頭から変換する。
     fn convert_mixed(&mut self, head: &str, tail: &str) -> Vec<Candidate> {
-        let after_head = !head.is_empty() || self.pin.is_some();
+        let left = if head.is_empty() && self.pin.is_none() {
+            Left::Start
+        } else if self.pin.is_none() && head.starts_with(|c: char| c.is_ascii_alphabetic()) && tail.starts_with(is_kana_char) {
+            // 英単語の直後から始まる続きは、英単語を名詞と見なして変換する (pin があれば、直後とは限らないので BOS のまま)。
+            Left::EnglishHead
+        } else {
+            Left::Head
+        };
         let mut list: Vec<Candidate> = Vec::new();
-        for (engine_index, text) in self.convert_with_arrows(tail, after_head).into_iter().enumerate() {
+        for (engine_index, text) in self.convert_with_arrows(tail, left).into_iter().enumerate() {
             let text = format!("{head}{text}");
             if !list.iter().any(|c| c.text == text) {
                 list.push(Candidate { text, source: Source::Engine(EngineRank(engine_index)) });
@@ -923,7 +953,12 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
         let origin = (self.segments.clone(), self.romaji.buffer().to_string());
         self.pin = None;
         let head_text = split.head.clone();
+        let pending = split.pending.clone();
         self.segments = Segment::from_split(split.head, split.tail).collect();
+        if !pending.is_empty() {
+            // 子音が残ったまま確定する (artifactwok)。打鍵のままのかなとして末尾に持つ。
+            self.segments.push(Segment::Kana { keys: pending.clone(), kana: pending.clone() });
+        }
         self.romaji.clear();
         self.sync_hiragana();
         self.reset_candidates();
@@ -931,6 +966,9 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
         self.typing = Typing::Mixed;
         self.split_origin = Some(origin);
         self.reading.list = self.convert_mixed(&head_text, &tail);
+        for candidate in &mut self.reading.list {
+            candidate.text.push_str(&pending);
+        }
     }
 
     /// 英語を打っていると見なせる局面。英字のまま表示し、Enter の確定もその英字にする (表示と確定は同じ判定を共有する)。

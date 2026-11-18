@@ -66,6 +66,8 @@ pub struct KkcCore {
     /// 辞書にない開発用語のカタカナ語 (`dev_kana_words.txt`)。`open` は空のまま (azooKey と同じ結果を保つ)。上限 (`Limits`) も `open` は PARITY、`open_with_config` は IME。
     extra: lattice::ExtraWords,
     limits: Limits,
+    /// `suru_noun_rcid` の結果 (辞書は変わらないので 1 度だけ引く)。
+    suru_noun: std::cell::OnceCell<Option<elem::Rcid>>,
 }
 
 impl KkcCore {
@@ -80,7 +82,7 @@ impl KkcCore {
     }
 
     fn open_with_extra(extra: lattice::ExtraWords, limits: Limits) -> Result<Self, DictError> {
-        Ok(Self { dict: Dictionary::open_default()?, cache: RefCell::new(lattice::LookupCache::new()), scratch: RefCell::new(lattice::Scratch::default()), extra, limits })
+        Ok(Self { dict: Dictionary::open_default()?, cache: RefCell::new(lattice::LookupCache::new()), scratch: RefCell::new(lattice::Scratch::default()), extra, limits, suru_noun: std::cell::OnceCell::new() })
     }
 
     /// 一覧の語を文字列で渡して開く (テスト用)。
@@ -113,6 +115,15 @@ impl KkcCore {
     /// その読みで始まる辞書の見出しがあるか (あぴー → アピール)。読みそのものが見出しでなくてもよい。動的な語は見ない。辞書が読めなければ false。
     pub fn has_reading_prefix(&self, hiragana: &str) -> bool {
         self.dict.has_reading_prefix(&dict::to_katakana(hiragana)).unwrap_or(false)
+    }
+
+    /// 「〜する」が続く名詞 (サ変名詞) の右の連接 ID。辞書の見出し「ヘンコウ」のうち、語が「変更」で value が最大の要素のもの。
+    /// 英単語 (merge, commit) のあとの続きを、名詞のあととして変換するのに使う (`CandidateEngine::convert_after_english_head`)。引けなければ None。
+    pub fn suru_noun_rcid(&self) -> Option<elem::Rcid> {
+        *self.suru_noun.get_or_init(|| {
+            let best = self.headwords("ヘンコウ").into_iter().filter(|e| e.word == "変更").max_by(|a, b| a.value.total_cmp(&b.value))?;
+            Some(elem::Rcid(best.rcid as usize))
+        })
     }
 
     /// カタカナの読み `katakana` で、表記が漢字 `kanji` 1 字の見出しが辞書にあるか。live 変換の Backspace が読みを切り分けるのに使う。
@@ -495,6 +506,12 @@ impl CandidateEngine for RustEngine {
     /// 英単語や固定した語のあとの読み。直前に確定した語の続きではないので、連接 ID を使わず文頭から変換する。
     fn convert_after_head(&mut self, revision: u64, hiragana: &str) -> Vec<String> {
         self.convert_from(revision, hiragana, None)
+    }
+
+    /// 英単語のあとの読み。英単語を名詞と見なし、その右の連接 ID (`KkcCore::suru_noun_rcid`) の続きとして変換する (merge + した → mergeした)。引けなければ `convert_after_head` と同じ。
+    fn convert_after_english_head(&mut self, revision: u64, hiragana: &str) -> Vec<String> {
+        let left = self.core.as_ref().and_then(|core| core.suru_noun_rcid());
+        self.convert_from(revision, hiragana, left)
     }
 
     fn cancel(&mut self) {
@@ -1428,6 +1445,21 @@ mod tests {
         let shift = core.dict.cc(left.0, head.lcid) - core.dict.cc(0, head.lcid);
         assert!(shift.abs() > 0.5, "前提: 連接 ID で先頭の連接コストが動く ({shift})");
         assert!((with_left.value - common.value - shift).abs() < 1e-3, "{} - {} は {shift}", with_left.value, common.value);
+    }
+
+    #[test]
+    fn after_an_english_head_the_reading_is_converted_as_following_a_suru_noun() {
+        let core = Rc::new(KkcCore::open().unwrap());
+        let rcid = core.suru_noun_rcid();
+        assert!(rcid.is_some(), "辞書に ヘンコウ = 変更 がある");
+        let mut e = RustEngine::with_core(core.clone()).with_judge(no_judge);
+        assert_eq!(e.convert_after_head(1, "した")[0], "下", "頭のあとの変換 (文頭から) は変わらない");
+        assert_eq!(e.convert(1, "した")[0], "下", "先頭の変換も変わらない");
+        let after = e.convert_after_english_head(1, "した");
+        assert_eq!(after[0], "した", "{after:?}");
+        let mut e = RustEngine::with_core(core).with_judge(no_judge);
+        e.set_context("", Some(rcid.unwrap()), false);
+        assert_eq!(e.convert(1, "した"), after, "変更のあとの変換と同じ");
     }
 
     #[test]
