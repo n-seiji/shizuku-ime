@@ -912,6 +912,7 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
             |w| self.lexicon.is_english_word(w),
             |w| self.lexicon.is_english_prefix(w),
             |kana| self.engine.has_reading(kana),
+            |w| self.lexicon.is_dev_word(w),
         )
     }
 

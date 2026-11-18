@@ -3190,3 +3190,19 @@ fn 複数形の歯止めは語幹のかなが助詞になるときは使わな�
     type_cased(&mut c, "PCmadesu");
     assert_eq!(c.preedit(), "PCまです");
 }
+
+#[test]
+fn 開発用語の一覧の語は3文字でも助詞の前で英語の頭にし_日本語の打ちかけは分けない() {
+    let lexicon = || FakeLexicon::default().with_dev_word(|w| matches!(w, "git" | "todo" | "token"));
+    for (keys, shown) in [("gitwo", "gitを"), ("todoga", "todoが"), ("tokende", "tokenで"), ("tokennisuru", "tokenにする")] {
+        let mut c = Composer::new(MockEngine { log: Log::default(), table: vec![] }, lexicon());
+        type_keys(&mut c, keys);
+        assert_eq!(c.preedit(), shown, "{keys}");
+        assert_eq!(c.commit_preview(), shown, "{keys}");
+    }
+    for (keys, shown) in [("todoke", "とどけ"), ("gitai", "ぎたい"), ("tokei", "とけい")] {
+        let mut c = Composer::new(MockEngine { log: Log::default(), table: vec![] }, lexicon());
+        type_keys(&mut c, keys);
+        assert_eq!(c.preedit(), shown, "{keys}");
+    }
+}
