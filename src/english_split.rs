@@ -188,6 +188,65 @@ pub fn split(
         .or_else(relaxed)
 }
 
+/// 続き全体がこのかなのとき、英単語の綴りでもある (でも demo, まで made, して site) 続きは略語のあとの助詞として分ける。
+/// `TAILS` のうち 1 かなの助詞と から まで より って する して した に、短い助詞の組み合わせ (でも とか とも では にも とは のは のも のが のを のに へは へも) を足したもの
+/// (`TAILS` の しま / され / させ / でき は含まない)。ので (node) は PCnode / XMLnode と紛れるので入れない。
+const PARTICLES: &[&str] = &[
+    "に", "を", "が", "は", "で", "と", "の", "も", "へ", "から", "まで", "より", "って", "する", "して", "した", "でも", "とか", "とも", "では",
+    "には", "にも", "とは", "のは", "のも", "のが", "のを", "のに", "へは", "へも",
+];
+
+/// かなの組 tail が余りなく (pending なし) `PARTICLES` の語になるか。
+fn is_particle(tail: &[(String, String)], pending: &str) -> bool {
+    let whole: String = tail.iter().map(|(_, kana)| kana.as_str()).collect();
+    pending.is_empty() && PARTICLES.contains(&whole.as_str())
+}
+
+/// 打鍵 raw が全部かなになり、そのかな全体が `PARTICLES` の語か。
+fn stem_is_particle(raw: &str) -> bool {
+    let (tail, pending) = convert(raw, false);
+    !has_ascii(&tail) && is_particle(&tail, &pending)
+}
+
+/// 略語として扱う頭か。大文字の ASCII だけで 2 文字以上 (URL, PC)。大文字 1 文字 (X, T) は含めない。
+pub fn is_acronym(head: &str) -> bool {
+    head.len() >= 2 && head.bytes().all(|b| b.is_ascii_uppercase())
+}
+
+/// 大文字だけの略語 head のあとに小文字の続き tail_raw が打たれたとき、略語 + かな に分ける。分けられなければ None。
+/// 続きが助詞など (`TAILS`) で始まり、最後まで全部かなにしきれるときに限る。打ちかけの未確定ローマ字 (urlmok の k) は、小文字の英単語 + 助詞と同じに残して表示する (n だけは ん)。
+/// 歯止め: 続き全体が英単語なら切らない (PCmode の mode, XMLnode の node)。略語を小文字にした全体が英単語のときも切らない (NOde。こちらは助詞でも優先しない)。
+/// `is_english` は英単語か (`Composer::is_english_word_raw` と同じ基準)。ただし続きが余りなくかなになり、そのかな全体が `PARTICLES` の語なら、続きが英単語でも分ける (PCdemo → PCでも, PCmade → PCまで)。
+pub fn split_acronym(head: &str, tail_raw: &str, is_english: impl Fn(&str) -> bool) -> Option<Split> {
+    if !is_acronym(head) || tail_raw.is_empty() || !tail_raw.bytes().all(|b| b.is_ascii_lowercase()) {
+        return None;
+    }
+    let (mut tail, mut pending) = convert(tail_raw, false);
+    if pending == "n" {
+        // 末尾の n だけは、確定で ん になる (小文字の英語分割と同じ)。
+        (tail, pending) = convert(tail_raw, true);
+    }
+    if has_ascii(&tail) {
+        return None;
+    }
+    let mut prefix = String::new();
+    let starts_with_tail = tail.iter().any(|(_, kana)| {
+        prefix.push_str(kana);
+        TAILS.contains(&prefix.as_str())
+    });
+    if !starts_with_tail {
+        return None;
+    }
+    let particle = is_particle(&tail, &pending);
+    // 続き全体が英単語、またはその複数形 (modes, tokens) なら切らない。ただし語幹のかなが助詞 (demos の demo) なら複数形とは見なさない。
+    let plural = tail_raw.strip_suffix('s').is_some_and(|stem| is_english(stem) && !stem_is_particle(stem));
+    let word = is_english(tail_raw) || plural;
+    if is_english(&(head.to_ascii_lowercase() + tail_raw)) || (!particle && word) {
+        return None;
+    }
+    Some(Split { head: head.to_string(), tail, pending })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,5 +428,77 @@ mod tests {
         assert_eq!(relaxed("loginfa", true, &["login"], &["login"]), None);
         assert_eq!(relaxed("loginlo", true, &["login"], &["login"]), None);
         assert_eq!(relaxed("logincha", true, &["login"], &["login"]), None);
+    }
+
+    /// 語彙を持たない (どの綴りも英単語でない) まま、略語 + 続きを分けた表示。
+    fn acronym(head: &str, tail: &str) -> Option<String> {
+        split_acronym(head, tail, |_| false).map(|s| s.display())
+    }
+
+    #[test]
+    fn 略語のあとの助詞をかなにする() {
+        assert_eq!(acronym("URL", "mo").as_deref(), Some("URLも"));
+        assert_eq!(acronym("PC", "wo").as_deref(), Some("PCを"));
+        assert_eq!(acronym("PR", "no").as_deref(), Some("PRの"));
+        assert_eq!(acronym("API", "wotataku").as_deref(), Some("APIをたたく"));
+        assert_eq!(acronym("PR", "desu").as_deref(), Some("PRです"));
+        assert_eq!(acronym("PC", "womotteitte").as_deref(), Some("PCをもっていって"));
+    }
+
+    #[test]
+    fn 略語のあとの打ちかけのローマ字は残し_nだけはんにする() {
+        assert_eq!(acronym("URL", "mok").as_deref(), Some("URLもk"));
+        assert_eq!(acronym("URL", "mon").as_deref(), Some("URLもん"));
+    }
+
+    #[test]
+    fn 略語のあとが助詞で始まらないか_かなにしきれなければ分けない() {
+        for tail in ["s", "m", "name", "server", "data", "kit", "file", "document", "memory", "error"] {
+            assert_eq!(acronym("URL", tail), None, "{tail}");
+        }
+        assert_eq!(acronym("DB", "name"), None);
+    }
+
+    #[test]
+    fn 略語は大文字2文字以上だけ() {
+        assert!(is_acronym("PC") && is_acronym("HTTP"));
+        assert!(!is_acronym("X") && !is_acronym("Url") && !is_acronym("pc") && !is_acronym("P1"));
+        assert_eq!(acronym("U", "mo"), None);
+        assert_eq!(acronym("Url", "mo"), None);
+        assert_eq!(acronym("URL", "Mo"), None);
+        assert_eq!(acronym("URL", ""), None);
+    }
+
+    #[test]
+    fn 続き全体が英単語なら略語でも切らない() {
+        let words = |w: &str| matches!(w, "mode" | "node" | "today" | "token");
+        let shown = |tail: &str| split_acronym("PC", tail, words).map(|s| s.display());
+        assert_eq!(shown("mo").as_deref(), Some("PCも"));
+        assert_eq!(shown("mod").as_deref(), Some("PCもd"), "語の途中はかな表示");
+        assert_eq!(shown("mode"), None);
+        assert_eq!(shown("node"), None);
+        assert_eq!(shown("today"), None);
+        assert_eq!(shown("token"), None);
+        assert_eq!(shown("modo").as_deref(), Some("PCもど"));
+    }
+
+    #[test]
+    fn 英単語でもある助詞の組み合わせは歯止めより分けるほうを優先する() {
+        let words = |w: &str| matches!(w, "demo" | "made" | "site" | "kara" | "tomo" | "toka" | "node" | "mode");
+        let shown = |tail: &str| split_acronym("PC", tail, words).map(|s| s.display());
+        assert_eq!(shown("demo").as_deref(), Some("PCでも"));
+        assert_eq!(shown("made").as_deref(), Some("PCまで"));
+        assert_eq!(shown("site").as_deref(), Some("PCして"));
+        assert_eq!(shown("kara").as_deref(), Some("PCから"));
+        assert_eq!(shown("tomo").as_deref(), Some("PCとも"));
+        assert_eq!(shown("toka").as_deref(), Some("PCとか"));
+        assert_eq!(shown("node"), None, "ので は入れない");
+        assert_eq!(shown("mode"), None, "もで は組み合わせにない");
+    }
+
+    #[test]
+    fn 略語を小文字にした全体が英単語なら切らない() {
+        let r = split_acronym("NO", "de", |w| w == "node");
+        assert_eq!(r, None);
     }
 }

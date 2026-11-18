@@ -569,16 +569,149 @@ sonokenn<bs><enter>	そのけ
 <live>sensei<bs><space><enter>	戦
 <live>sensei<bs>Apple<enter>	せんApple
 # live 変換で、かなのあとに大文字から始まる英字が続いても、かな部分の変換を保つ (Enter が確定するのは見えているとおり)。かな部分が 2 かな以下ならひらがなのまま。
-# 漢字はエンジン順 (judge なし) のもの。英字の後ろの小文字は英字のまま。
+# 漢字はエンジン順 (judge なし) のもの。英字の後ろの小文字は英字のまま (大文字だけの略語 + 助詞は下の別の節)。
 <live>raisyuudeOK<enter>	来週でOK
 <live>asitademoOk<enter>	明日でもOk
 <live>kyouTokyo<enter>	強Tokyo
 <live>kyouhaON<enter>	今日はON
-<live>kyouhaPRdesu<enter>	今日はPRdesu
+<live>kyouhaPRdesu<enter>	今日はPRです
 <live>iPhone<enter>	いPhone
 <live>kyouTokyo<bs><bs><bs><bs><enter>	強T
 <live>kyouTokyo<bs><bs><bs><bs><bs><enter>	強
 <live>raisyuudeOK<space><enter>	来週でOK
+# 大文字だけの略語 (2 文字以上) のあとに助詞などで始まる小文字が続き、最後までかなにしきれるときは、略語を英語の頭、続きを日本語として扱う (小文字の英単語 + 助詞と同じ)。
+# 漢字はエンジン順 (judge なし) のもの。
+<live>URLmo<enter>	URLも
+<live>PCwo<enter>	PCを
+<live>PRno<enter>	PRの
+<live>APIwotataku<enter>	APIを叩く
+<live>PCwomotteitte<enter>	PCを持っていって
+<live>kyouhaPRdesu<space><enter>	今日はPRです
+<live>kyouhaPRmo<enter>	今日はPRも
+URLmo<enter>	URLも
+URLmo<space><enter>	URLも
+kyouhaPRdesu<enter>	きょうはPRです
+<space-mode>APIwotataku<space><enter>	APIを叩く
+# 続きが助詞で始まらない・かなにしきれない・続き全体が英単語のときは、打ち終えた時点で英字のまま。途中 (PCmod → PCもd) はかな表示。
+<live>PCmode<enter>	PCmode
+<live>PCnode<enter>	PCnode
+<live>APItoken<enter>	APItoken
+<live>APItool<enter>	APItool
+<live>PCmod<enter>	PCもd
+<live>USAtoday<enter>	USAtoday
+<live>DBname<enter>	DBname
+<live>URLs<enter>	URLs
+<live>APIs<enter>	APIs
+<live>IDs<enter>	IDs
+<live>HTTPserver<enter>	HTTPserver
+<live>JSONdata<enter>	JSONdata
+<live>UIkit<enter>	UIkit
+<live>OSname<enter>	OSname
+<live>PDFdocument<enter>	PDFdocument
+<live>CSVfile<enter>	CSVfile
+<live>XMLnode<enter>	XMLnode
+<live>IOerror<enter>	IOerror
+<live>GPUmemory<enter>	GPUmemory
+PCmode<enter>	PCmode
+XMLnode<enter>	XMLnode
+<live>URLmoD<enter>	URLもD
+<live>URLmo1<enter>	URLも1
+<live>URLmo-<enter>	URLも-
+<live>URLmoURLmo<enter>	URLもURLも
+# 続きが英単語でも、続き全体が助詞 (でも とか とも から まで して) になるなら助詞として分ける。live の漢字はエンジン順 (judge なし)。
+<live>PCdemo<enter>	PCでも
+<live>PCtoka<enter>	PCとか
+<live>PCmade<enter>	PCまで
+<live>PCsite<enter>	PCして
+<live>URLkara<enter>	URLから
+<live>PCtomo<enter>	PCとも
+<live>URLmon<enter>	URLもん
+<space-mode>PCdemo<space><enter>	PCでも
+<space-mode>URLkara<space><enter>	URLから
+<space-mode>PCsite<space><enter>	PCして
+<space-mode>PCtoka<space><enter>	PCとか
+PCdemo<space><enter>	PCでも
+# 固定したあとに略語と助詞を打っても、固定は保つ (見えているままの固定と残りの後ろに付く)。
+<live>kugiwoutu<bs>PCwo<enter>	釘を打PCを
+<live>kugiwoutu<bs>PCwo<bs><enter>	釘を打PCw
+<live>kugiwoutu<bs>PCwo<bs><bs><enter>	釘を打PC
+<live>kugiwoutu<bs>PCwotataku<enter>	釘を打PCを叩く
+<live>senseiha<bs>kouPCwo<enter>	先生項PCを
+<live>kugiwoutu<bs>PCwo<space><enter>	釘をうPCを
+# 組み替えたあとの大文字・記号は後ろに付き、2 つ目の略語 + 助詞も組み替える。小文字の英語分割のあとの略語も同じ。
+githubwoAPIdetataku<enter>	githubをAPIでたたく
+<live>artifactwoAPIdesu<enter>	artifactをAPIです
+<live>PCwoA<enter>	PCをA
+<live>PCwotatakuOK<enter>	PCを叩くOK
+<live>PCwokopi-<enter>	PCをコピ-
+<live>githubwokopi-<enter>	githubをこぴ-
+<live>kyouhaOKdesuPRmo<enter>	今日はOKですPRも
+# 略語のあとの続きが 2 かな以下なら、live でもひらがなのまま (Space で変換できる)。
+<live>PCmade<space><enter>	PCまで
+PCmade<enter>	PCまで
+PCtomo<enter>	PCとも
+PCwoAPIdetataku,<enter>	PCをAPIでたたく、
+PCwotatakuOK<bs><bs><enter>	PCをたたく
+# 組み替えた組成に句読点を足して Backspace で消すと、同じ打鍵列を直接打ったときと同じになる (次の小文字は判定し直す)。
+URLmo.<bs>de<enter>	URLmode
+URLmo.<bs>de<bs><enter>	URLもd
+URLmo.<bs><bs>o<enter>	URLも
+kyouhaPRdesu.<bs><bs>u<enter>	きょうはPRです
+URLmo.<bs>de<live><enter>	URLmode
+URLmo.<bs>k<live>a<enter>	URLもか
+kyouhaPRdesu.<bs>k<live>a<enter>	今日はPRですか
+<live>kugiwoutu<bs>PCwo.<bs><bs><enter>	釘を打PCw
+<live>kugiwoutu<bs>PCwo.<bs><bs>o<enter>	釘を打PCを
+# 組み替えたあとの大文字・数字は、略語より前の変換と固定を保ったまま後ろに付く。
+<live>kugiwoutu<bs>PCmo1<enter>	釘を打PCも1
+<live>kugiwoutu<bs>PCwo1<bs><enter>	釘を打PCを
+<live>kyouhaPRdesuA<enter>	今日はPRですA
+<live>kyouhaPRdesuA<bs><enter>	今日はPRです
+<live>kyouhaPRdesuAB<bs><enter>	今日はPRですA
+# 続きが英単語の複数形でも切らない。そのあとに日本語が続けば分ける。
+PCmodes<enter>	PCmodes
+<live>XMLnodes<enter>	XMLnodes
+<live>APItokens<enter>	APItokens
+<live>APItools<enter>	APItools
+PCmodesu<enter>	PCもです
+# 2 つ目の略語の組み替えが外れても (続きが英単語になった、Backspace で助詞でなくなった)、前の部分の変換と固定を保つ。
+<live>kugiwoutu<bs>PCwoURLmode<enter>	釘を打PCをURLmode
+<live>kyouhaPRdesuURLmode<enter>	今日はPRですURLmode
+<live>kyouhaPRdesuURLmo<bs><enter>	今日はPRですURLm
+<live>kugiwoutu<bs>PCwoURLmo<bs><enter>	釘を打PCをURLm
+<live>kyouhaPRdesuURLmo<bs><bs><bs><enter>	今日はPRですUR
+# 複数形の歯止めは、語幹のかなが助詞になるときは使わない。
+PCdemos<enter>	PCでもs
+PCmades<enter>	PCまでs
+PCmadesu<enter>	PCまです
+# かなにしきれず残った英字・数字の直後の大文字は略語にしない (iOS の い のように、かなになったものの直後は略語になる)。
+<live>macOSde<enter>	まcOSde
+<live>kOSde<enter>	kOSde
+<live>kyou1OSde<enter>	今日1OSde
+<live>iOSde<enter>	いOSで
+# 先頭だけ大文字の語と大文字 1 文字のあとの小文字は今のまま。
+<live>Rustde<enter>	Rustde
+<live>Slackwo<enter>	Slackwo
+<live>IPhonewo<enter>	IPhonewo
+<live>iPhonewo<enter>	いPhonewo
+<live>Xwo<enter>	Xwo
+# 略語のあとの助詞に続く句読点は和文になる。続けて打つと確定してから始まる。
+<live>URLmo,<enter>	URLも、
+<live>PCwomotteitte,<enter>	PCを持っていって、
+<live>kyouhaPRdesu.<enter>	今日はPRです。
+<live>URLmo,PRno<enter>	URLも、PRの
+<live>URLmo,hoge<enter>	URLも、ほげ
+URLmo,<enter>	URLも、
+# Backspace は打鍵を 1 つ消して判定し直す。
+<live>URLmo<bs><enter>	URLm
+<live>URLmo<bs><bs><enter>	URL
+<live>URLmo<bs>o<enter>	URLも
+<live>PCwomotteitte<bs><bs><enter>	PCを持っていt
+<live>kyouhaPRdesu<bs><enter>	今日はPRでs
+<live>kyouhaPRdesu<bs><bs><bs><bs><bs><enter>	今日はP
+# 打ちかけのローマ字は小文字の英語分割と同じに表示のまま確定し、n だけは ん になる。
+<live>URLmok<enter>	URLもk
+<live>URLmonn<enter>	URLもん
 # 固定したあとに大文字から始まる英字が続いても、固定は保ち、見えている固定と残りの後ろに英字を付ける (読み全体を変換し直さない)。Space は固定を外して読み全体を変換し直す (英字は残る)。
 <live>kugiwoutu<bs>A<enter>	釘を打A
 <live>kyouha<bs>OK<enter>	今日OK
@@ -789,3 +922,6 @@ uketuke<space><enter><bs>tou<space><enter>	受塔
 uketuke<space><enter><enter>tou<space><enter>	受付\n塔
 uketuke<space><enter>a<enter>tou<space><enter>	受付あ塔
 tou<space><enter>	塔
+# 控えた手前の変換は次の組成に持ち越さない (2 つ目の組成は、直前の確定が違っても同じ変換になる)。
+<live>gatuhaPCmo1<enter>gatuhaPCmo<enter>	がつはPCも1月はPCも
+<live>asitaPCmo1<enter>gatuhaPCmo<enter>	明日PCも1月はPCも

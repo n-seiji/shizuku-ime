@@ -536,6 +536,35 @@ mod tests {
     }
 
     #[test]
+    fn 大文字だけの略語のあとの助詞は途中も確定もかなになり_英単語の続きは英字のまま() {
+        let (shown, out) = typed_english("URLmo");
+        assert_eq!(shown.last().unwrap(), "URLも");
+        assert_eq!(out, "URLも");
+        let (shown, out) = typed_english("kyouhaPRdesu");
+        assert_eq!(shown.last().unwrap(), "きょうはPRです");
+        assert_eq!(out, "きょうはPRです");
+        let lexicon = FakeLexicon::default().with_english_word(|w| w == "mode").with_english_prefix(|w| "mode".starts_with(w));
+        let memory = lexicon.memory();
+        let mut session = Session::new(Composer::new(NullEngine, lexicon), memory, ConversionMode::Space);
+        shown_after_english(&mut session, "PCmode");
+        assert_eq!(session.marked_text(), "PCmode");
+        let out: String = session
+            .handle(&ALLOW, Key::Enter, "\r")
+            .effects
+            .into_iter()
+            .filter_map(|effect| if let Effect::Insert { text, .. } = effect { Some(text) } else { None })
+            .collect();
+        assert_eq!(out, "PCmode");
+    }
+
+    #[test]
+    fn 大文字だけの略語のあとの助詞に句読点が続くと和文になる() {
+        let (shown, out) = typed_english("URLmo,");
+        assert_eq!(shown.last().unwrap(), "URLも、");
+        assert_eq!(out, "URLも、");
+    }
+
+    #[test]
     fn 英単語のあとの助詞はスペースで変換に入り候補は一度ずつ() {
         let mut session = english_session();
         shown_after_english(&mut session, "artifactni ");

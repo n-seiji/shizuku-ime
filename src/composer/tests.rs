@@ -2635,3 +2635,558 @@ fn 固定した語のあとの残りの読みは_convert_after_headで変換し_
     assert_eq!(converted_of(&c), ["せんせいこう"], "固定を外すと読み全体が組成の先頭");
     assert_eq!(after_head_of(&c), Vec::<String>::new());
 }
+
+// 大文字だけの略語 (2 文字以上) のあとに助詞などで始まる小文字が続き、最後までかなにしきれるときは、略語を英語の頭、続きを日本語として扱う。
+
+type AcronymComposer = Composer<MockEngine, FakeLexicon>;
+
+fn acronym_composer(live: bool) -> (AcronymComposer, Log) {
+    let log = Log::default();
+    let table = [
+        ("きょうは", "今日は"),
+        ("です", "です"),
+        ("も", "も"),
+        ("を", "を"),
+        ("をたたく", "を叩く"),
+        ("をもっていって", "を持っていって"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), vec![v.to_string()]))
+    .collect();
+    let engine = MockEngine { log: log.clone(), table };
+    let lexicon = FakeLexicon::default()
+        .with_english_word(|w| matches!(w, "mode" | "node" | "today" | "token" | "tool" | "demo" | "made" | "site" | "kara" | "tomo" | "toka"));
+    let mut c = Composer::new(engine, lexicon);
+    c.set_live(live);
+    (c, log)
+}
+
+/// Session と同じ振り分けで打つ: 大文字は flush してから英字、Literal / Mixed の間の小文字は英字の続き、それ以外の小文字はローマ字。
+fn type_cased(c: &mut AcronymComposer, keys: &str) {
+    for ch in keys.chars() {
+        let text = ch.to_string();
+        if ch.is_ascii_uppercase() {
+            c.flush_romaji();
+            c.push_literal(&text);
+        } else if matches!(c.phase(), Phase::Literal | Phase::Mixed) {
+            c.push_literal(&text);
+        } else {
+            c.type_romaji(&text);
+        }
+    }
+}
+
+fn assert_acronym_wysiwyg(c: &AcronymComposer) {
+    assert_eq!(c.preedit(), c.commit_preview(), "raw={}", c.raw());
+}
+
+#[test]
+fn 略語のあとの助詞はかなになり_文頭でもかなのあとでも同じ() {
+    for (keys, shown) in [
+        ("URLmo", "URLも"),
+        ("PCwo", "PCを"),
+        ("PRno", "PRの"),
+        ("APIwotataku", "APIをたたく"),
+        ("kyouhaPRdesu", "きょうはPRです"),
+    ] {
+        let (mut c, _) = acronym_composer(false);
+        type_cased(&mut c, keys);
+        assert_eq!(c.phase(), Phase::Mixed, "{keys}");
+        assert_eq!(c.preedit(), shown, "{keys}");
+        assert_acronym_wysiwyg(&c);
+        assert_eq!(commit_text(&mut c), shown, "{keys}");
+    }
+}
+
+#[test]
+fn 略語のあとの打鍵は途中のどこでも表示と確定が一致する() {
+    for keys in ["URLmo", "PCwomotteitte", "kyouhaPRdesu", "APIwotataku", "URLmok", "URLmon", "PCmode", "USAtoday", "XMLnode"] {
+        for live in [false, true] {
+            let (mut c, _) = acronym_composer(live);
+            let mut typed = String::new();
+            for ch in keys.chars() {
+                typed.push(ch);
+                type_cased(&mut c, &ch.to_string());
+                assert_acronym_wysiwyg(&c);
+                assert_eq!(c.raw(), typed);
+            }
+        }
+    }
+}
+
+#[test]
+fn 略語のあとが英単語や助詞で始まらない続きなら最後まで英字のまま() {
+    for keys in [
+        "PCmode", "USAtoday", "APItoken", "APItool", "DBname", "URLs", "APIs", "IDs", "HTTPserver", "JSONdata", "UIkit", "OSname",
+        "PDFdocument", "CSVfile", "XMLnode", "IOerror", "GPUmemory",
+    ] {
+        for live in [false, true] {
+            let (mut c, _) = acronym_composer(live);
+            type_cased(&mut c, keys);
+            assert_eq!(c.preedit(), keys, "{keys} live={live}");
+            assert_acronym_wysiwyg(&c);
+            assert_eq!(commit_text(&mut c), keys, "{keys} live={live}");
+        }
+    }
+}
+
+#[test]
+fn 続きが英単語の途中の間は略語のあとでもかな表示で_打ち終えると英字になる() {
+    for (keys, shown) in [("USAtod", "USAとd"), ("USAtoda", "USAとだ"), ("PCmod", "PCもd"), ("XMLnod", "XMLのd"), ("PCmode", "PCmode")] {
+        let (mut c, _) = acronym_composer(false);
+        type_cased(&mut c, keys);
+        assert_eq!(c.preedit(), shown);
+        assert_acronym_wysiwyg(&c);
+    }
+}
+
+#[test]
+fn 英単語でもある助詞の組み合わせは略語のあとでかなになる() {
+    for (keys, shown) in [
+        ("PCdemo", "PCでも"),
+        ("PCmade", "PCまで"),
+        ("PCsite", "PCして"),
+        ("URLkara", "URLから"),
+        ("PCtomo", "PCとも"),
+        ("PCtoka", "PCとか"),
+        ("URLmon", "URLもん"),
+    ] {
+        for live in [false, true] {
+            let (mut c, _) = acronym_composer(live);
+            type_cased(&mut c, keys);
+            // 続きが 2 かな以下なので live でもひらがなのまま。
+            assert_eq!(c.preedit(), shown, "{keys} live={live}");
+            assert_acronym_wysiwyg(&c);
+        }
+    }
+    let (mut c, _) = acronym_composer(false);
+    type_cased(&mut c, "PCdemo");
+    assert!(c.begin_conversion(), "Space で変換に入る");
+}
+
+#[test]
+fn 助詞の続きは途中のどの打鍵でも英字に戻らない() {
+    for live in [false, true] {
+        let (mut c, _) = acronym_composer(live);
+        type_cased(&mut c, "PCwo");
+        for ch in "motteitte".chars() {
+            type_cased(&mut c, &ch.to_string());
+            assert!(c.preedit().starts_with("PCを"), "{}", c.preedit());
+        }
+    }
+}
+
+#[test]
+fn 先頭だけ大文字の語と大文字1文字のあとは英字のまま() {
+    for keys in ["kyouTokyo", "Rustde", "Slackwo", "Appleni", "Okmo", "IPhonewo", "iPhonewo", "Xwo"] {
+        let (mut c, _) = acronym_composer(false);
+        type_cased(&mut c, keys);
+        assert!(!c.preedit().chars().any(|ch| matches!(ch, 'を' | 'に' | 'も')), "{keys}: {}", c.preedit());
+    }
+    let (mut c, _) = acronym_composer(false);
+    type_cased(&mut c, "kyouTokyo");
+    assert_eq!(c.preedit(), "きょうTokyo");
+}
+
+#[test]
+fn 略語のあとの小文字を消すと打鍵のとおり判定し直す() {
+    let (mut c, _) = acronym_composer(false);
+    type_cased(&mut c, "URLmo");
+    assert!(c.backspace());
+    assert_eq!(c.preedit(), "URLm");
+    assert_eq!(c.phase(), Phase::Literal);
+    assert_acronym_wysiwyg(&c);
+    type_cased(&mut c, "o");
+    assert_eq!(c.preedit(), "URLも");
+    type_cased(&mut c, "te");
+    assert_eq!(c.preedit(), "URLもて");
+    assert!(c.backspace());
+    assert!(c.backspace());
+    assert_eq!(c.preedit(), "URLも");
+    assert!(c.backspace());
+    assert!(c.backspace());
+    assert_eq!(c.preedit(), "URL");
+    assert!(c.backspace());
+    assert!(c.backspace());
+    assert!(c.backspace());
+    assert!(c.is_empty());
+}
+
+#[test]
+fn 略語のあとのかなに続けて大文字や数字や記号を打つと組み替えたかなの後ろに付く() {
+    let (mut c, _) = acronym_composer(false);
+    type_cased(&mut c, "URLmoD");
+    assert_eq!(c.preedit(), "URLもD");
+    assert_acronym_wysiwyg(&c);
+    for key in ["1", "-"] {
+        let (mut c, _) = acronym_composer(false);
+        type_cased(&mut c, "URLmo");
+        c.push_literal(key);
+        assert_eq!(c.preedit(), format!("URLも{key}"));
+        assert_acronym_wysiwyg(&c);
+    }
+}
+
+#[test]
+fn 組み替えたあとの2つ目の略語と助詞も組み替える() {
+    let (mut c, _) = acronym_composer(false);
+    type_cased(&mut c, "PCwoAPIdetataku");
+    assert_eq!(c.preedit(), "PCをAPIでたたく");
+    assert_acronym_wysiwyg(&c);
+    let (mut c, _) = acronym_composer(false);
+    type_cased(&mut c, "URLmoURLmo");
+    assert_eq!(c.preedit(), "URLもURLも");
+    assert_acronym_wysiwyg(&c);
+}
+
+fn pinned_kugi_acronym() -> Composer<WordsEngine, FakeLexicon> {
+    let mut c = pinned_kugi();
+    for (i, ch) in "PCwo".chars().enumerate() {
+        let text = ch.to_string();
+        if i < 2 {
+            c.flush_romaji();
+        }
+        c.push_literal(&text);
+    }
+    c
+}
+
+#[test]
+fn 固定のあとに略語と助詞を打っても固定を保つ() {
+    let c = pinned_kugi_acronym();
+    assert!(c.pin.is_some());
+    // 続きが 2 かな以下なので live でもひらがなのまま。
+    assert_eq!(c.preedit(), "釘を打PCを");
+    assert_eq!(c.commit_preview(), "釘を打PCを");
+}
+
+#[test]
+fn 固定のあとの略語と助詞を消すと固定を保ったまま打鍵のとおりに戻る() {
+    let mut c = pinned_kugi_acronym();
+    assert!(c.backspace());
+    assert!(c.pin.is_some());
+    assert_eq!(c.preedit(), "釘を打PCw");
+    assert_eq!(c.commit_preview(), "釘を打PCw");
+}
+
+#[test]
+fn 略語のあとの助詞のあとの日本語はそのまま続く() {
+    let (mut c, _) = acronym_composer(false);
+    type_cased(&mut c, "PCwomotteitte");
+    assert_eq!(c.preedit(), "PCをもっていって");
+    assert_acronym_wysiwyg(&c);
+}
+
+#[test]
+fn 略語のあとの未確定のローマ字は小文字の英語分割と同じに残し_nだけはんになる() {
+    let (mut c, _) = acronym_composer(false);
+    type_cased(&mut c, "URLmok");
+    assert_eq!(c.preedit(), "URLもk");
+    assert_acronym_wysiwyg(&c);
+    let (mut c, _) = acronym_composer(false);
+    type_cased(&mut c, "URLmon");
+    assert_eq!(c.preedit(), "URLもん");
+    assert_acronym_wysiwyg(&c);
+    type_cased(&mut c, "a");
+    assert_eq!(c.preedit(), "URLもな");
+}
+
+#[test]
+fn 略語のあとの助詞はスペースの候補になる() {
+    let (mut c, _) = acronym_composer(false);
+    type_cased(&mut c, "APIwotataku");
+    assert!(c.begin_conversion());
+    assert_eq!(c.display(), "APIを叩く");
+    assert_eq!(texts(&c).first().copied(), Some("APIを叩く"));
+    assert!(texts(&c).contains(&"APIwotataku"));
+}
+
+#[test]
+fn live変換中は略語のあとのかな部分と手前のかなを変換して表示する() {
+    let (mut c, _) = acronym_composer(true);
+    type_cased(&mut c, "kyouhaPRdesu");
+    assert_eq!(c.preedit(), "今日はPRです");
+    assert_acronym_wysiwyg(&c);
+    let (mut c, _) = acronym_composer(true);
+    type_cased(&mut c, "PCwomotteitte");
+    assert_eq!(c.preedit(), "PCを持っていって");
+    assert_eq!(commit_text(&mut c), "PCを持っていって");
+}
+
+#[test]
+fn 略語のあとの助詞に句読点が続くと和文になり_次のキーは確定してから始まる() {
+    let (mut c, _) = acronym_composer(false);
+    type_cased(&mut c, "URLmo");
+    assert!(c.punct_continues_kana());
+    c.type_text(",");
+    assert_eq!(c.preedit(), "URLも、");
+    assert!(c.closed_by_punct_after_english_head());
+    let (mut c, _) = acronym_composer(false);
+    type_cased(&mut c, "kyouhaPRdesu");
+    c.type_text(".");
+    assert_eq!(c.preedit(), "きょうはPRです。");
+    assert!(c.closed_by_punct_after_english_head());
+}
+
+#[test]
+fn live切り替えは略語のあとの候補を作り直す() {
+    let (mut c, _) = acronym_composer(false);
+    type_cased(&mut c, "kyouhaPRdesu");
+    assert_eq!(c.preedit(), "きょうはPRです");
+    c.set_live(true);
+    assert_eq!(c.preedit(), "今日はPRです");
+    c.set_live(false);
+    assert_eq!(c.preedit(), "きょうはPRです");
+    assert_acronym_wysiwyg(&c);
+}
+
+#[test]
+fn 略語のあとの助詞の確定は略語だけを英字として返す() {
+    let (mut c, _) = acronym_composer(false);
+    type_cased(&mut c, "APIwotataku");
+    let committed = c.commit();
+    assert_eq!(committed.text, "APIをたたく");
+    assert_eq!(committed.english, ["API"]);
+    assert_eq!(committed.tail, None);
+}
+
+// 2 回目のレビューの指摘: 句読点のあとの Backspace、組み替えたあとの大文字・数字、複数形、かなにしきれなかった英字の直後、2 かな以下の続き、変換の回数。
+
+/// type_cased に、`.` (和文の句読点)、`^` (Backspace)、`~` (live の切り替え) を足した打鍵。
+fn type_ops(c: &mut AcronymComposer, ops: &str) {
+    for ch in ops.chars() {
+        match ch {
+            '.' => {
+                c.flush_romaji();
+                assert!(c.punct_continues_kana(), "{}", c.preedit());
+                c.type_text(".");
+            }
+            '^' => assert!(c.backspace()),
+            '~' => {
+                let live = c.is_live();
+                c.set_live(!live);
+            }
+            _ => type_cased(c, &ch.to_string()),
+        }
+    }
+}
+
+/// ops を打った結果が、打鍵だけを直接打った結果 (live の設定は ops の終わりと同じ) と同じか。
+fn assert_same_as_direct(ops: &str, direct: &str) {
+    for start_live in [false, true] {
+        let (mut c, _) = acronym_composer(start_live);
+        type_ops(&mut c, ops);
+        let (mut d, _) = acronym_composer(c.is_live());
+        type_cased(&mut d, direct);
+        assert_eq!(c.raw(), d.raw(), "{ops} live={start_live}");
+        assert_eq!(c.preedit(), d.preedit(), "{ops} live={start_live}");
+        assert_eq!(c.phase(), d.phase(), "{ops} live={start_live}");
+        assert_acronym_wysiwyg(&c);
+        assert_eq!(c.commit_preview(), d.commit_preview(), "{ops} live={start_live}");
+    }
+}
+
+#[test]
+fn 句読点のあとのbackspaceは同じ打鍵列を直接打ったときと同じになる() {
+    assert_same_as_direct("URLmo.^", "URLmo");
+    assert_same_as_direct("URLmo.^de^", "URLmod");
+    assert_same_as_direct("URLmo.^de", "URLmode");
+    assert_same_as_direct("URLmo.^^", "URLm");
+    assert_same_as_direct("URLmo.^^o", "URLmo");
+    assert_same_as_direct("kyouhaPRdesu.^^u", "kyouhaPRdesu");
+    assert_same_as_direct("kyouhaPRdesu.^^", "kyouhaPRdes");
+    assert_same_as_direct("URLmo.^de~", "URLmode");
+    assert_same_as_direct("URLmo.^k~a", "URLmoka");
+    assert_same_as_direct("kyouhaPRdesu.^k~a", "kyouhaPRdesuka");
+}
+
+#[test]
+fn 固定のあとの略語に句読点を足して消しても固定を保つ() {
+    let mut c = pinned_kugi_acronym();
+    assert!(c.punct_continues_kana());
+    c.type_text(".");
+    assert!(c.backspace());
+    assert!(c.pin.is_some());
+    assert_eq!(c.preedit(), "釘を打PCを");
+    assert!(c.backspace());
+    assert!(c.pin.is_some());
+    assert_eq!(c.preedit(), "釘を打PCw");
+    assert_eq!(c.commit_preview(), "釘を打PCw");
+}
+
+#[test]
+fn 組み替えたあとに大文字や数字を足しても手前の変換と固定を保つ() {
+    let (mut c, _) = acronym_composer(true);
+    type_cased(&mut c, "kyouhaPRdesu");
+    assert_eq!(c.preedit(), "今日はPRです");
+    type_cased(&mut c, "A");
+    assert_eq!(c.preedit(), "今日はPRですA");
+    assert_acronym_wysiwyg(&c);
+    assert!(c.backspace());
+    assert_eq!(c.preedit(), "今日はPRです");
+    let (mut c, _) = acronym_composer(true);
+    type_cased(&mut c, "kyouhaOKdesuPRmo");
+    assert_eq!(c.preedit(), "今日はOKですPRも");
+    assert_acronym_wysiwyg(&c);
+    let mut c = pinned_kugi_acronym();
+    c.push_literal("1");
+    assert_eq!(c.preedit(), "釘を打PCを1");
+    assert!(c.pin.is_some());
+    assert_wysiwyg(&c);
+    assert!(c.backspace());
+    assert_eq!(c.preedit(), "釘を打PCを");
+    assert!(c.pin.is_some());
+}
+
+#[test]
+fn 組み替えたあとの小文字は手前の変換を保ったまま後ろに付く() {
+    let (mut c, _) = acronym_composer(true);
+    type_cased(&mut c, "kyouhaPRdesuA");
+    type_cased(&mut c, "b");
+    assert_eq!(c.preedit(), "今日はPRですAb");
+    assert_acronym_wysiwyg(&c);
+}
+
+#[test]
+fn 続きから末尾のsを除いたものが英単語でも切らない() {
+    for keys in ["PCmodes", "XMLnodes", "APItokens", "APItools"] {
+        for live in [false, true] {
+            let (mut c, _) = acronym_composer(live);
+            type_cased(&mut c, keys);
+            assert_eq!(c.preedit(), keys, "{keys} live={live}");
+            assert_acronym_wysiwyg(&c);
+            assert_eq!(commit_text(&mut c), keys);
+        }
+    }
+    let (mut c, _) = acronym_composer(false);
+    type_cased(&mut c, "PCmodesu");
+    assert_eq!(c.preedit(), "PCもです");
+}
+
+#[test]
+fn かなにしきれなかった英字や数字の直後の大文字は略語にしない() {
+    for (keys, shown) in [("macOSde", "まcOSde"), ("kOSde", "kOSde")] {
+        let (mut c, _) = acronym_composer(false);
+        type_cased(&mut c, keys);
+        assert_eq!(c.preedit(), shown, "{keys}");
+        assert_acronym_wysiwyg(&c);
+    }
+    let (mut c, _) = acronym_composer(false);
+    c.type_text("1");
+    type_cased(&mut c, "OSde");
+    assert_eq!(c.preedit(), "1OSde");
+    assert_acronym_wysiwyg(&c);
+    let (mut c, _) = acronym_composer(false);
+    type_cased(&mut c, "iOSde");
+    assert_eq!(c.preedit(), "いOSで");
+}
+
+#[test]
+fn live変換は略語のあとの続きが2かな以下ならひらがなのまま_スペースで変換できる() {
+    let (mut c, _) = acronym_composer(true);
+    type_cased(&mut c, "PCmade");
+    assert_eq!(c.preedit(), "PCまで");
+    assert_acronym_wysiwyg(&c);
+    assert!(c.begin_conversion());
+    assert!(c.candidates().iter().any(|x| x.text == "PCまでK1"), "{:?}", texts(&c));
+    let (mut c, _) = acronym_composer(true);
+    type_cased(&mut c, "URLmon");
+    assert_eq!(c.preedit(), "URLもん");
+    let (mut c, _) = acronym_composer(true);
+    type_cased(&mut c, "PCwotataku");
+    assert_eq!(c.preedit(), "PCを叩く");
+}
+
+#[test]
+fn 略語の手前の変換は手前の読みが変わらない間は使い回す() {
+    let (mut c, log) = acronym_composer(true);
+    type_cased(&mut c, "kyouhaPC");
+    let count = |log: &Log| log.converts.borrow().iter().filter(|(_, reading)| reading == "きょうは").count();
+    let before = count(&log);
+    type_cased(&mut c, "womotteitte");
+    assert_eq!(count(&log), before + 1, "略語のあとの打鍵ごとに手前を変換し直さない");
+}
+
+// 3 回目のレビュー: 2 つ目の略語の組み替えが外れても、前の部分の変換と固定を保つ。組成をまたいで控えを持ち越さない。複数形の歯止めは助詞の途中では使わない。
+
+/// WordsComposer に、Session と同じ振り分けで英字を打つ (大文字は flush してから)。
+fn type_words_cased(c: &mut WordsComposer, keys: &str) {
+    for ch in keys.chars() {
+        if ch.is_ascii_uppercase() {
+            c.flush_romaji();
+        }
+        c.push_literal(&ch.to_string());
+    }
+}
+
+#[test]
+fn 固定のあとの2つ目の略語の組み替えが外れても固定と前の部分を保つ() {
+    let mut c = Composer::new(WordsEngine { has_words: true, ..WordsEngine::default() }, FakeLexicon::default().with_english_word(|w| w == "mode"));
+    c.set_live(true);
+    type_units(&mut c, &[("ku", "く"), ("gi", "ぎ"), ("wo", "を"), ("u", "う"), ("tu", "つ")]);
+    assert!(c.backspace());
+    type_words_cased(&mut c, "PCwo");
+    for ch in "URLmode".chars() {
+        type_words_cased(&mut c, &ch.to_string());
+        assert!(c.pin.is_some(), "{}", c.raw());
+        assert!(c.preedit().starts_with("釘を打PCを"), "{}", c.preedit());
+        assert_wysiwyg(&c);
+    }
+    assert_eq!(c.preedit(), "釘を打PCをURLmode");
+}
+
+#[test]
+fn 固定のあとの2つ目の略語を消して助詞でなくなっても固定と前の部分を保つ() {
+    let mut c = pinned_kugi_acronym();
+    type_words_cased(&mut c, "URLmo");
+    assert_eq!(c.preedit(), "釘を打PCをURLも");
+    assert!(c.backspace());
+    assert!(c.pin.is_some());
+    assert_eq!(c.preedit(), "釘を打PCをURLm");
+    assert_wysiwyg(&c);
+}
+
+#[test]
+fn 手前に組み替え済みの略語があるとき_2つ目の略語の組み替えが外れても手前の変換を保つ() {
+    let (mut c, _) = acronym_composer(true);
+    for ch in "kyouhaPRdesuURLmode".chars() {
+        type_cased(&mut c, &ch.to_string());
+        if c.raw().len() > "kyouhaPRdesu".len() {
+            assert!(c.preedit().starts_with("今日はPRです"), "{}", c.preedit());
+        }
+        assert_acronym_wysiwyg(&c);
+    }
+    assert_eq!(c.preedit(), "今日はPRですURLmode");
+    let (mut c, _) = acronym_composer(true);
+    type_cased(&mut c, "kyouhaPRdesuURLmo");
+    assert_eq!(c.preedit(), "今日はPRですURLも");
+    for shown in ["今日はPRですURLm", "今日はPRですURL", "今日はPRですUR"] {
+        assert!(c.backspace());
+        assert_eq!(c.preedit(), shown);
+        assert_acronym_wysiwyg(&c);
+    }
+}
+
+#[test]
+fn 控えた略語の手前の変換は次の組成に持ち越さない() {
+    let (mut c, log) = acronym_composer(true);
+    type_cased(&mut c, "kyouhaPCmo");
+    assert_eq!(commit_text(&mut c), "今日はPCも");
+    let count = |log: &Log| log.converts.borrow().iter().filter(|(_, reading)| reading == "きょうは").count();
+    let before = count(&log);
+    type_cased(&mut c, "kyouhaPCmo");
+    assert!(count(&log) > before + 1, "2 つ目の組成は手前を変換し直す");
+}
+
+#[test]
+fn 複数形の歯止めは語幹のかなが助詞になるときは使わない() {
+    for (keys, shown) in [("PCdemos", "PCでもs"), ("PCmades", "PCまでs"), ("PCmodes", "PCmodes")] {
+        let (mut c, _) = acronym_composer(false);
+        type_cased(&mut c, keys);
+        assert_eq!(c.preedit(), shown, "{keys}");
+        assert_acronym_wysiwyg(&c);
+    }
+    let (mut c, _) = acronym_composer(false);
+    type_cased(&mut c, "PCmadesu");
+    assert_eq!(c.preedit(), "PCまです");
+}
