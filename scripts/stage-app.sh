@@ -20,6 +20,11 @@ rm -rf "$DST"
 mkdir -p dist
 cp -R "$SRC" "$DST"
 
+# The dogfood tools (tools/dogfood/) are never part of the app. Only paths inside the bundle
+# count, so a checkout directory with that word in its name does not trip this.
+stray=$(cd "$DST" && find . -iname '*dogfood*')
+[[ -z "$stray" ]] || fail "the bundle contains dogfood paths: $stray"
+
 res=$DST/Contents/Resources
 missing=()
 for f in judge/model_q8_0.gguf judge/tokenizer.json LICENSE NOTICE THIRD_PARTY_LICENSES dictionary; do

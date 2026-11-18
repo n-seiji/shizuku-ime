@@ -52,6 +52,12 @@ run = "SHIZUKU_SIM_LEARNING=1 cargo run --release -- --simulate-file tools/learn
 
 
 
+[tasks.dogfood]
+env = { SHIZUKU_DICTIONARY = "{{config_root}}/dictionary" }
+description = "固定の入力 (tools/dogfood/seed.tsv) をライブ変換+審判で打ち、節ごとの追加打鍵数を測って前回の run との差分を出す。結果はリポジトリの外 ($SHIZUKU_DOGFOOD_DIR、既定 ~/.local/share/shizuku-dogfood/)。審判が動いた記録が無ければ何も書かず失敗する。審判のモデルが別の場所にある worktree では SHIZUKU_JUDGE_DIR を渡す (task の env に書くと外から上書きできないので run 行に書いている)"
+depends = ["build"]
+run = "SHIZUKU_JUDGE_DIR=\"${SHIZUKU_JUDGE_DIR:-{{config_root}}/resources/judge}\" uv run --script tools/dogfood/run.py tools/dogfood/seed.tsv --judge required --text"
+
 [tasks.kkc-compare]
 env = { SHIZUKU_DICTIONARY = "{{config_root}}/dictionary" }
 description = "Rust 版 KKC を azooKey (Swift) 版の golden と比べる (mise run kkc-compare -- --golden tools/golden/typed.jsonl.gz --show 20)"
