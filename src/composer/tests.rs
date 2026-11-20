@@ -357,6 +357,8 @@ struct WordsEngine {
     cancels: Rc<RefCell<usize>>,
     /// `convert_after_head` に渡された読み (`converted` にも入る)。
     after_head: Rc<RefCell<Vec<String>>>,
+    /// `convert_after_english_head` に渡された読み (`after_head` にも `converted` にも入る)。
+    english_head: Rc<RefCell<Vec<String>>>,
 }
 
 fn pairs(words: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -394,6 +396,10 @@ impl CandidateEngine for WordsEngine {
     fn convert_after_head(&mut self, revision: u64, hiragana: &str) -> Vec<String> {
         self.after_head.borrow_mut().push(hiragana.to_string());
         self.convert(revision, hiragana)
+    }
+    fn convert_after_english_head(&mut self, revision: u64, hiragana: &str) -> Vec<String> {
+        self.english_head.borrow_mut().push(hiragana.to_string());
+        self.convert_after_head(revision, hiragana)
     }
     fn cancel(&mut self) {
         *self.cancels.borrow_mut() += 1;
@@ -1377,6 +1383,17 @@ fn live中の英語分割に付いた末尾の子音は_見えている分割の
     type_keys(&mut c, "artifactwok");
     let shown = c.preedit();
     assert_eq!(shown, "artifactをk");
+    c.flush_romaji_for_commit();
+    assert_eq!(commit_text(&mut c), shown);
+}
+
+#[test]
+fn live中の英語分割に子音が残っていても_下線の変換結果にその子音を足してenterで確定する() {
+    let (mut c, _) = live_split_composer();
+    type_keys(&mut c, "artifactwokok");
+    let shown = c.preedit();
+    assert_eq!(shown, "artifactをこK1k");
+    assert_eq!(c.commit_preview(), shown);
     c.flush_romaji_for_commit();
     assert_eq!(commit_text(&mut c), shown);
 }
@@ -2608,6 +2625,52 @@ fn 英単語のあとの読みは_live表示でも確定でも_convert_after_hea
     assert_eq!(c.phase(), Phase::Mixed);
     let (after_head, all) = via_head(&c);
     assert!(after_head > 0 && after_head == all, "確定: {:?} {:?}", after_head_of(&c), converted_of(&c));
+}
+
+fn english_head_of(c: &WordsComposer) -> Vec<String> {
+    c.engine.english_head.borrow().clone()
+}
+
+#[test]
+fn 英単語の直後から始まる読みは_convert_after_english_headで変換する() {
+    let split_composer = |live: bool| {
+        let lexicon = FakeLexicon::default().with_english_word(|w| w == "artifact");
+        let mut c = Composer::new(WordsEngine { has_words: true, ..WordsEngine::default() }, lexicon);
+        c.set_live(live);
+        for ch in "artifactnitou".chars() {
+            c.type_romaji(&ch.to_string());
+        }
+        c
+    };
+    let c = split_composer(true);
+    assert_eq!(english_head_of(&c).last().map(String::as_str), Some("にとう"), "live: {:?}", english_head_of(&c));
+    assert_eq!(english_head_of(&c), after_head_of(&c), "英単語のあとの変換は全部 convert_after_english_head");
+    let mut c = split_composer(false);
+    c.flush_romaji();
+    assert_eq!(c.phase(), Phase::Mixed);
+    assert_eq!(english_head_of(&c).last().map(String::as_str), Some("にとう"), "確定: {:?}", english_head_of(&c));
+    let mut c = space_mode_composer();
+    c.push_literal("X");
+    type_sensei(&mut c);
+    assert!(c.begin_conversion());
+    assert_eq!(english_head_of(&c).last().map(String::as_str), Some("せんせい"), "先頭の英字のあと");
+}
+
+#[test]
+fn 英単語のあとでない読みは_convert_after_english_headを使わない() {
+    let mut c = words_composer();
+    type_sensei(&mut c);
+    assert_eq!(english_head_of(&c), Vec::<String>::new(), "組成の先頭");
+    let mut c = pinned_sensei();
+    type_kou(&mut c);
+    assert!(!after_head_of(&c).is_empty(), "前提: 固定のあとは after_head");
+    assert_eq!(english_head_of(&c), Vec::<String>::new(), "固定した語のあと");
+    let mut c = space_mode_composer();
+    c.push_literal("X");
+    c.push_literal("Y");
+    type_sensei(&mut c);
+    assert!(c.begin_conversion());
+    assert_eq!(english_head_of(&c), Vec::<String>::new(), "読みが英字で始まる (直後がかなではない)");
 }
 
 #[test]

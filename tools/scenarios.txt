@@ -31,6 +31,15 @@ artifactwotsukau<space><enter>	artifactを使う
 <live>mergewosite<enter>	mergeをして
 <live>artifactni<enter>	artifactに
 <live>artifactwok<enter>	artifactをk
+<live>gitnituit<enter>	gitについt
+<live>apinituit<enter>	apiについt
+<live>imagenotukaikat<enter>	imageの使い化t
+mergesita<enter>	mergeした
+<live>mergesita<enter>	mergeした
+<live>commitsita<enter>	commitした
+<live>testsitakara<enter>	testしたから
+<live>mergesuru<enter>	mergeする
+<live>ma-zisita<enter>	マージした
 <live>artifactwokousinsite<bs><bs><enter>	artifactを更新
 # 英単語 + 日本語の組成の句読点は、日本語だけの組成と同じく和文になり、組成に残って Enter で確定する。
 <live>buildgatooranai.<enter>	buildが通らない。
@@ -724,8 +733,8 @@ URLmo,<enter>	URLも、
 <live>kyouhaOK<space-mode><space><space><enter>	kyouhaOK
 # 英単語のあとに助詞で始まらないかなが続いても、頭に l q v x を含む語なら英単語とかなに分ける。語が打ちかけの間 (informa) や日本語として自然でない続きは分けない。
 # 漢字はエンジン順 (judge なし) のもの。
-<live>loginjinihiraku<enter>	login耳に開く
-loginjinihiraku<space><enter>	login耳に開く
+<live>loginjinihiraku<enter>	login時に開く
+loginjinihiraku<space><enter>	login時に開く
 <live>lineni<enter>	lineに
 <live>linksite<enter>	linkして
 <live>playtime<enter>	playtime
@@ -981,7 +990,7 @@ nulltyekku<space><enter>	nullチェック
 <live>fileformat<enter>	fileformat
 <live>testkeesu<enter>	testkeesu
 <live>apikii<enter>	アピ聞い
-<live>loginjinihiraku<enter>	login耳に開く
+<live>loginjinihiraku<enter>	login時に開く
 <live>loginfa<enter>	ォ銀ふぁ
 <live>nullkonnnichiha<enter>	nullkonn日は
 # 打鍵全体のかな読みが辞書の見出しなら、一覧の語 (join) でも頭にしない (jointo = ジョイント)。
