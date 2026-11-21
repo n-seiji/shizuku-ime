@@ -757,7 +757,7 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
     }
 
     /// 確定のための flush。表示がかな + 未確定のローマ字のままなら (kyout)、flush しない:
-    /// 子音を ASCII のかなとして取り込むと英語の合図 (`has_ascii_kana`) になり、表示と違う raw で確定してしまう。
+    /// 子音を ASCII のかなとして取り込むと、英語の合図 (`stray_consonant_is_english`) に当たる組成は、表示と違う raw で確定してしまう。
     /// その場合は `commit_preview` が未確定のローマ字を表示のまま足す。英語として扱い直す組成だけ flush する。
     /// かなが 1 つも無い (子音だけの k, n) ときは、打鍵のまま ASCII のかなとして取り込み (n を ん にしない)、raw で確定する。
     pub fn flush_romaji_for_commit(&mut self) {
@@ -810,7 +810,8 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
         if let Some(split) = self.english_split(true) {
             return Settle::Mixed(split);
         }
-        if self.is_kana_editing() && (english || self.has_ascii_kana()) {
+        let raw = self.raw();
+        if self.is_kana_editing() && (english || self.stray_consonant_is_english(raw.strip_prefix('/').unwrap_or(&raw))) {
             return Settle::Dangling;
         }
         Settle::Unchanged
@@ -972,8 +973,10 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
     }
 
     /// 英語を打っていると見なせる局面。英字のまま表示し、Enter の確定もその英字にする (表示と確定は同じ判定を共有する)。
-    /// かなの途中に変換できない子音が挟まった (merge の めrげ) か、かなにしきれない打鍵が残り、
-    /// 打鍵列全体が英語として確定したことのある語・開発用語の一覧の語 (git) か 4 文字以上の英単語 (enter) になっている。
+    /// かなの途中に変換できない子音が挟まった (merge の めrげ) 組成は、子音の手前でかなが 4 単位に満たないか、打鍵列が知られた語の形かその途中 (`stray_consonant_is_english`)。
+    /// それより長くかなが続くとき (ほげほげほえks) は、かなにしきれない子音があっても英語にしない。
+    /// 子音が挟まらなくても、かなにしきれない打鍵が残り、
+    /// 打鍵列全体が英語として確定したことのある語・開発用語の一覧の語 (git) か 4 文字以上の英単語 (enter) になっていれば英語。
     /// 一覧の語は数字を含んでよい (base64)。打鍵列全体がその語になったときだけで、手前 (base6) や一覧にない数字付き (kyou1) は対象外 (`is_english_charset`)。
     /// 先頭が `/` でも、残りがその語なら同じ (/posts)。表の短い語は日本語の打ちかけ (in, den) と紛れるので外す。
     /// 語でない打鍵列に子音が残っただけ (kyout) は英語とせず、かな表示のまま確定する (`kana_view`)。
@@ -983,7 +986,31 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
         let word = || self.is_whole_word_pending();
         self.is_kana_editing()
             && self.is_english_charset(typed)
-            && (self.has_ascii_kana() || word() || self.is_verdict(&raw, Verdict::Word) || self.is_verdict(&raw, Verdict::Judged))
+            && (self.stray_consonant_is_english(typed) || word() || self.is_verdict(&raw, Verdict::Word) || self.is_verdict(&raw, Verdict::Judged))
+    }
+
+    /// かなにしきれず ASCII のまま残った子音を、英語の合図として扱うか (`is_typing_english` と `settle` が共有する)。
+    /// 子音の手前でかなが `JAPANESE_RUN_MIN` 単位以上続いていれば、きれいな日本語の打ち間違いと見なして合図にしない (ほげほげほえks)。
+    /// ただし打鍵列が知られた語の形 (`english_split::is_known_form`: 語、活用形、複合語) かその途中なら、今までどおり英語 (appointment, maintainers, datasource)。
+    /// 知られた語の形 + 助詞などの打ちかけ (`english_split::is_known_form_with_tail`: commandg, commandka, appendsur) も英語。続けて打つと commandが / commandから で切れるので、その手前でかなに見せない。typed は先頭の `/` を除いた打鍵列。
+    fn stray_consonant_is_english(&self, typed: &str) -> bool {
+        let known = |text: &str| english_split::is_known_form(text, |w| self.is_english_word_raw(w));
+        self.has_ascii_kana()
+            && (self.clean_japanese_units() < english_split::JAPANESE_RUN_MIN
+                || known(typed)
+                || english_split::is_known_form_with_tail(typed, |w| self.is_english_word_raw(w))
+                || self.lexicon.is_english_prefix(typed)
+                || self.lexicon.is_dev_word_prefix(typed))
+    }
+
+    /// かなの先頭から、ローマ字からかなになった単位 (kyo, ha, ん, tte の っ, 長音 ー) がいくつ続くか (`english_split::clean_run`)。
+    /// 単位は `Segment::Kana` 1 つ。ASCII のまま残ったかな、外来語の切れ端 (ぃ ぇ)、数字・記号の区切りで止まる。
+    fn clean_japanese_units(&self) -> usize {
+        let letters = self.segments.iter().map_while(|s| match s {
+            Segment::Kana { keys, kana } if keys.bytes().all(|b| b.is_ascii_lowercase()) || (keys == "-" && kana == "ー") => Some(kana.as_str()),
+            _ => None,
+        });
+        english_split::clean_run(letters)
     }
 
     /// 打鍵列全体が、未確定のローマ字もかなにしきれない文字も残らない英単語か。
@@ -1096,7 +1123,7 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
             || (raw.len() >= MIN_LEN && self.lexicon.is_english_word(raw))
     }
 
-    /// 変換できずに ASCII のまま残った文字が組成に含まれるか(英単語の合図)。英字の区切りは数えない。
+    /// 変換できずに ASCII のまま残った文字が組成に含まれるか。英単語の合図の 1 つだが、これだけでは英語にしない (`stray_consonant_is_english`)。英字の区切りは数えない。
     fn has_ascii_kana(&self) -> bool {
         self.segments.iter().any(Segment::has_ascii_kana)
     }
@@ -1160,7 +1187,27 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
     /// 未確定のローマ字を 1 文字消す。
     pub fn backspace_romaji(&mut self) {
         self.romaji.handle_backspace();
+        if self.thaw_failed_consonant() {
+            self.refresh();
+        }
         self.settle_pending();
+    }
+
+    /// 未確定のローマ字が空になったとき、直前の打鍵で ASCII のかなになった子音 (hoek + s の k) を未確定のローマ字に戻す。
+    /// 消した打鍵より前の状態に戻すので、次の打鍵がその子音と組み合わさる (k + a → か)。戻したら true (読みが変わるので呼び出し側が作り直す)。
+    /// かな入力の組成 (英字の区切りを含まない) だけ。
+    fn thaw_failed_consonant(&mut self) -> bool {
+        let thawed = matches!(self.stage, Stage::Editing)
+            && matches!(self.typing, Typing::Kana | Typing::English)
+            && self.romaji.buffer().is_empty()
+            && !self.segments.iter().any(Segment::is_literal)
+            && matches!(self.segments.last(), Some(Segment::Kana { keys, kana }) if keys == kana && keys.bytes().all(|b| b.is_ascii_lowercase()));
+        if let (true, Some(Segment::Kana { keys, .. })) = (thawed, self.segments.last()) {
+            let keys = keys.clone();
+            self.segments.pop();
+            self.romaji.set_buffer(&keys);
+        }
+        thawed
     }
 
     /// 未確定のローマ字を捨てる。
@@ -1537,6 +1584,7 @@ impl<E: CandidateEngine, L: Lexicon> Composer<E, L> {
             self.resync_after_backspace(acronym, popped, converted);
             self.typing = self.literal_typing();
         } else {
+            self.thaw_failed_consonant();
             self.refresh();
         }
         true

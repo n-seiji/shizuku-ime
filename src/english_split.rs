@@ -17,6 +17,69 @@ const DICTIONARY_MIN_LEN: usize = 4;
 /// 続きの先頭をカタカナ語の読みと見なす最小のかな数 (`starts_with_katakana_word`)。
 const KATAKANA_WORD_MIN_KANA: usize = 3;
 
+/// 変換できない子音の手前でかなが何単位続いたら、きれいな日本語の打ち間違いと見なして英語にしないか。
+/// 辞書に無い頭を子音で終わる外来の綴りとして切るのも、これ未満のときだけ。`Composer::stray_consonant_is_english` と共有する。
+pub const JAPANESE_RUN_MIN: usize = 4;
+
+/// 複合語 (datasource) の各部分の最小の長さ。
+const COMPOUND_PART_MIN: usize = 4;
+
+/// 語のあとにそのまま付く活用・派生の語尾。
+const SUFFIXES: [&str; 8] = ["s", "es", "d", "ed", "ing", "er", "ers", "ly"];
+
+/// 語尾が付くときに語末が変わる形 (generate → generating, commit → committed) の語尾。
+const STEM_CHANGING_SUFFIXES: [&str; 4] = ["ing", "ed", "er", "ers"];
+
+/// 打鍵列 typed が、知られた語 (`is_known`) そのもの、その活用形・派生形、または知られた語 2 つの複合語か。
+/// 活用形は `SUFFIXES` を付けた形と、語末の変わる形 (queries ← query, generating ← generate, committed ← commit)。
+/// 複合語は各部分が 4 文字以上 (datasource, readonly, autocomplete) で、`SUFFIXES` が付いてもよい。
+/// `Composer::stray_consonant_is_english` と `split` が共有する (かなが長く続いても英語として扱う語の判定)。
+pub fn is_known_form(typed: &str, is_known: impl Fn(&str) -> bool) -> bool {
+    let compound = |word: &str| {
+        (COMPOUND_PART_MIN..=word.len().saturating_sub(COMPOUND_PART_MIN))
+            .any(|i| word.is_char_boundary(i) && is_known(&word[..i]) && is_known(&word[i..]))
+    };
+    let base = |word: &str| is_known(word) || compound(word);
+    let doubled = |stem: &str| matches!(stem.as_bytes(), [.., x, y] if x == y && x.is_ascii_alphabetic()) && is_known(&stem[..stem.len() - 1]);
+    base(typed)
+        || SUFFIXES.iter().any(|end| typed.strip_suffix(end).is_some_and(base))
+        || ["ies", "ied"].iter().any(|end| typed.strip_suffix(end).is_some_and(|stem| is_known(&format!("{stem}y"))))
+        || STEM_CHANGING_SUFFIXES.iter().any(|end| {
+            typed.strip_suffix(end).is_some_and(|stem| is_known(&format!("{stem}e")) || doubled(stem))
+        })
+}
+
+/// 打鍵列 typed が、知られた語の形 (`is_known_form`) の頭に、`TAILS` の語の始まり (かな 1 つ分を含む途中まで) を打ちかけた形か。
+/// 続きは、かなが `TAILS` の語で始まる (split が切る形) か、`TAILS` の語の途中のかな (か は から の途中) と 2 字以下の未確定のローマ字だけ。
+/// 打ちかけの間 (commandka, commandkar) も、切れたあと (commandkara) と同じく英語の頭として扱うための判定。
+pub fn is_known_form_with_tail(typed: &str, is_known: impl Fn(&str) -> bool) -> bool {
+    (2..typed.len()).any(|i| typed.is_char_boundary(i) && is_tail_start(&typed[i..]) && is_known_form(&typed[..i], &is_known))
+}
+
+/// 名詞のあとによく続くが `TAILS` に無い語。ここでは切らない (確定は今までどおり打鍵のまま) が、
+/// 知られた語のあとに続いても かな に戻さず英語の表示を保つ (commandnado を こっまんdなど にしない)。
+const NOUN_FOLLOWERS: [&str; 12] = ["だ", "など", "なら", "なの", "なん", "みたい", "じゃ", "かも", "しか", "ばかり", "たち", "や"];
+
+/// 続き rest が、`TAILS` か `NOUN_FOLLOWERS` の語で始まるかな、またはその語の途中までのかなと短い未確定のローマ字か。
+fn is_tail_start(rest: &str) -> bool {
+    let followers = || TAILS.iter().chain(NOUN_FOLLOWERS.iter());
+    if !rest.bytes().all(|b| b.is_ascii_lowercase()) {
+        return false;
+    }
+    let (units, pending) = convert(rest, false);
+    if has_ascii(&units) {
+        return false;
+    }
+    let mut prefix = String::new();
+    if units.iter().any(|(_, kana)| {
+        prefix.push_str(kana);
+        followers().any(|tail| *tail == prefix)
+    }) {
+        return true;
+    }
+    pending.len() <= 2 && (prefix.is_empty() || followers().any(|tail| tail.len() > prefix.len() && tail.starts_with(&prefix)))
+}
+
 /// 助詞で始まらない続き (loginjinihiraku の じに…) を許すとき、頭に含まれているべき字。
 /// 日本語のローマ字ではほぼ使わない (l, x は小文字かなだけ)。time + い (timei) のような日本語の打ち間違いを切らないための歯止め。
 const FOREIGN_LETTERS: [char; 4] = ['l', 'q', 'v', 'x'];
@@ -87,18 +150,38 @@ fn not_japanese(head: &str, is_japanese: &impl Fn(&str) -> bool) -> bool {
     has_ascii(&units) || !pending.is_empty() || !is_japanese(&kana)
 }
 
+/// かな c が前のかな prev のあとに来て、外来語の綴りの切れ端 (ぁぃぅぇぉゎ、i 段でないあとのゃゅょ) か。
+fn foreign_kana(prev: Option<char>, c: char) -> bool {
+    matches!(c, 'ぁ' | 'ぃ' | 'ぅ' | 'ぇ' | 'ぉ' | 'ゎ') || (YOUON.contains(&c) && !prev.is_some_and(|p| I_ROW.contains(&p)))
+}
+
 /// 続きのかなが、外来語の綴りの切れ端ではなく日本語として自然か。ぁぃぅぇぉゎは含まず、ゃゅょは i 段のあとだけ。
 fn natural_kana(tail: &[(String, String)]) -> bool {
     let mut prev = None;
     for c in tail.iter().flat_map(|(_, kana)| kana.chars()) {
-        let small = matches!(c, 'ぁ' | 'ぃ' | 'ぅ' | 'ぇ' | 'ぉ' | 'ゎ');
-        let bad_youon = YOUON.contains(&c) && !prev.is_some_and(|p| I_ROW.contains(&p));
-        if small || bad_youon {
+        if foreign_kana(prev, c) {
             return false;
         }
         prev = Some(c);
     }
     true
+}
+
+/// 単位ごとのかな (kanas) の先頭から、ASCII のまま残った子音も外来語の切れ端 (ceiling の せいぃ) も含まない単位がいくつ続くか。
+/// 打鍵がローマ字でない区切り (数字・記号) は呼ぶ側が渡さない。
+pub fn clean_run<'a>(kanas: impl IntoIterator<Item = &'a str>) -> usize {
+    let mut prev = None;
+    let mut run = 0;
+    for kana in kanas {
+        for c in kana.chars() {
+            if c.is_ascii_alphabetic() || foreign_kana(prev, c) {
+                return run;
+            }
+            prev = Some(c);
+        }
+        run += 1;
+    }
+    run
 }
 
 /// 続きのかなの先頭が、辞書にあるカタカナ語の読み (ちぇっく → チェック, ふぁいる, ぺーじ) で、その読みに小さいかな (ぇ ぁ) が含まれ、残りが自然なかなか。
@@ -158,10 +241,12 @@ pub fn split(
     // 見出しの前方一致 (とどが は とどがわ の先頭) までは見ない: todoga まで英語でなくなるため。打鍵の途中 (todono〜todonotumar) は todoの… で、見出しになった時点 (todonotumari) で日本語に戻る。
     // 全体のかなは 1 回だけ作り (打ちかけでも Enter でも同じ判定になるよう、未確定の n は ん として)、見出しになる長さを覚える。
     let whole_reading = std::cell::OnceCell::new();
+    // 全体を確定まで変換した単位 (crosses_headword と clean_units が共有する)。
+    let finished_units = std::cell::OnceCell::new();
     let crosses_headword = |head: &str| {
         // (単位の打鍵の始まる位置, その単位までのかなの数) の並びと、見出しになるかなの数。かなにならない単位 (未確定の子音) の手前まで。
         let (starts, headword_lens): &(Vec<(usize, usize)>, Vec<usize>) = whole_reading.get_or_init(|| {
-            let (units, _) = convert(raw, true);
+            let units = finished_units.get_or_init(|| convert(raw, true).0);
             let (mut at, mut count, mut kana) = (0, 0, String::new());
             let mut starts = Vec::new();
             for (typed, k) in units.iter().take_while(|(_, k)| !k.chars().any(|c| c.is_ascii_alphabetic())) {
@@ -220,6 +305,21 @@ pub fn split(
             .collect();
         (2..raw.len()).rev().find_map(|i| relaxed_at(&boundaries, i))
     };
+    // 知られた語の形 (parameters, deployed, datasource)。かなが長く続く頭でも、打ち間違いでなく英語の頭として切る。
+    let known_form = |head: &str| is_known_form(head, |w| knows(w) || is_dev_word(w) || (w.len() >= DICTIONARY_MIN_LEN && is_dictionary_word(w)));
+    // 先頭から数えた、ローマ字からかなになった単位の終わりの位置 (clean_run まで)。頭の手前のかなが何単位続くかの数え直しをしない。
+    let clean_ends = std::cell::OnceCell::new();
+    let clean_units = |i: usize| {
+        let ends: &Vec<usize> = clean_ends.get_or_init(|| {
+            let units = finished_units.get_or_init(|| convert(raw, true).0);
+            let run = clean_run(units.iter().map(|(_, kana)| kana.as_str()));
+            units.iter().take(run).scan(0, |end, (typed, _)| {
+                *end += typed.len();
+                Some(*end)
+            }).collect()
+        });
+        ends.iter().take_while(|&&end| end <= i).count()
+    };
     // 語と分かる頭を先に、長い順で試す。語でない頭 (子音で終わる外来の綴り) は短い順で試す。長い順だと
     // artifactwokousinnsite を artifactwokousinn + して と切ってしまうため。
     (2..raw.len())
@@ -228,7 +328,7 @@ pub fn split(
         .or_else(|| {
             (2..raw.len()).find_map(|i| {
                 let consonant_end = !raw[..i].ends_with(['a', 'i', 'u', 'e', 'o']);
-                (consonant_end && foreign).then(|| split_at(i)).flatten()
+                (consonant_end && foreign && (clean_units(i) < JAPANESE_RUN_MIN || known_form(&raw[..i]))).then(|| split_at(i)).flatten()
             })
         })
         .or_else(relaxed)
@@ -346,6 +446,53 @@ mod tests {
         assert_eq!(shown("saikinnhaz"), None);
         assert_eq!(shown("sakihodohanasitakenndesug"), None);
         assert_eq!(shown("kittok"), None);
+    }
+
+    #[test]
+    fn かなが_4_単位以上続いたあとの子音で終わる語は辞書に無くても英単語の頭にしない() {
+        assert_eq!(shown("kyouhaiitenkidesuneksdesu"), None);
+        assert_eq!(shown("hogehogehoeksdesu"), None);
+        // 4 単位に満たなければ今までどおり分ける。
+        assert_eq!(shown("hogeksdesu").as_deref(), Some("hogeksです"));
+    }
+
+    const KNOWN: [&str; 14] = [
+        "maintain", "repository", "query", "generate", "rebase", "commit", "run", "data", "source", "read", "only", "auto", "complete", "git",
+    ];
+
+    fn known_form(typed: &str) -> bool {
+        is_known_form(typed, |w| KNOWN.contains(&w))
+    }
+
+    #[test]
+    fn 知られた語とその活用形と複合語は知られた形と見なす() {
+        for typed in [
+            "gits", "maintainers", "maintaining", "maintained", "maintainer", "repositories", "queries", "queried",
+            "generating", "generated", "rebasing", "rebaser",
+            "committed", "committing", "committer", "running",
+            "datasource", "readonly", "autocomplete", "datasources", "autocompleted",
+        ] {
+            assert!(known_form(typed), "{typed}");
+        }
+    }
+
+    #[test]
+    fn 知られた語に見えない打鍵列は知られた形と見なさない() {
+        for typed in ["", "s", "hogehogehoeks", "kyouhaiitenkidesuneks", "gitx", "gitsx", "datax", "dataso", "queryies", "ing", "ies"] {
+            assert!(!known_form(typed), "{typed}");
+        }
+        // 複合語の部分は 4 文字以上 (git + read は 3 文字の git があるので対象外)。
+        assert!(!known_form("gitread"));
+    }
+
+    #[test]
+    fn かなの単位は_ascii_のまま残ったかなと外来語の切れ端の手前まで数える() {
+        let clean_units = |raw: &str| clean_run(convert(raw, true).0.iter().map(|(_, kana)| kana.as_str()));
+        assert_eq!(clean_units("hogehogehoeks"), 6);
+        assert_eq!(clean_units("kyouhaiitenki"), 8);
+        assert_eq!(clean_units("hogeks"), 2);
+        assert_eq!(clean_units("ceilingfan"), 2, "せい の次の ぃ で止まる");
+        assert_eq!(clean_units("katta"), 3, "kat の っ も 1 単位");
     }
 
     #[test]

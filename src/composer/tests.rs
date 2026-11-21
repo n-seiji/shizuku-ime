@@ -1829,6 +1829,214 @@ fn commit_preview_は状態を変えず_commit_と同じ文字列を返す() {
     }
 }
 
+fn commit_of(keys: &str) -> (String, String) {
+    let mut c = typed_romaji(keys);
+    let shown = c.preedit();
+    c.flush_romaji_for_commit();
+    (shown.to_string(), c.commit().text)
+}
+
+#[test]
+fn かなが_4_単位続いたあとに変換できない子音が来ても英語にせずかなのまま表示して確定する() {
+    for (keys, shown) in [("hogehogehoeks", "ほげほげほえks"), ("kyouhaiitenkidesuneks", "きょうはいいてんきですねks"), ("kyouhaiitenkidesuneksdesu", "きょうはいいてんきですねksです")] {
+        let c = typed_romaji(keys);
+        assert_ne!(c.phase(), Phase::Dangling, "{keys}");
+        assert!(!c.is_typing_english(), "{keys}");
+        assert_eq!(commit_of(keys), (shown.to_string(), shown.to_string()), "{keys}");
+    }
+}
+
+#[test]
+fn かなが_4_単位に満たないうちに子音が挟まれば今までどおり英字で表示して確定する() {
+    for keys in ["merge", "hogeks", "kubectl", "tmux", "lockfile"] {
+        let c = typed_romaji(keys);
+        assert_eq!(c.phase(), Phase::Dangling, "{keys}");
+        assert_eq!(commit_of(keys), (keys.to_string(), keys.to_string()), "{keys}");
+    }
+}
+
+/// 知られた語 (4 文字以上の辞書の英単語) の一覧だけを持つ組成。
+fn known_words_composer() -> Composer<MockEngine, FakeLexicon> {
+    let lexicon = FakeLexicon::default().with_english_word(|w| {
+        matches!(
+            w,
+            "maintain" | "repository" | "query" | "generate" | "commit" | "data" | "source" | "read" | "only" | "complete" | "auto"
+                | "command" | "parameter" | "document" | "tokenization" | "append" | "opensearch"
+        )
+    });
+    Composer::new(MockEngine { log: Log::default(), table: Vec::new() }, lexicon)
+}
+
+/// Session と同じに、`-` は type_text、ほかの小文字は type_romaji で打つ。
+fn type_with_hyphen(c: &mut Composer<MockEngine, FakeLexicon>, keys: &str) {
+    for ch in keys.chars() {
+        match ch {
+            '-' => {
+                c.flush_romaji();
+                c.type_text("-");
+            }
+            _ => c.type_romaji(&ch.to_string()),
+        }
+    }
+}
+
+/// Session の Backspace と同じ分岐。
+fn press_backspace(c: &mut Composer<MockEngine, FakeLexicon>) {
+    if c.has_romaji() {
+        c.backspace_romaji();
+    } else {
+        c.backspace();
+    }
+}
+
+/// 下線、候補の並び、Enter で確定される文字列。
+fn observe(mut c: Composer<MockEngine, FakeLexicon>) -> (String, Vec<String>, String) {
+    let shown = c.preedit();
+    let candidates = c.candidates().iter().map(|x| x.text.clone()).collect();
+    c.flush_romaji_for_commit();
+    (shown, candidates, c.commit().text)
+}
+
+fn typed_known(keys: &str) -> Composer<MockEngine, FakeLexicon> {
+    let mut c = known_words_composer();
+    type_with_hyphen(&mut c, keys);
+    c
+}
+
+#[test]
+fn 変換できない子音を_backspace_で消せばかなの組成に戻る() {
+    let mut c = typed_romaji("hogehogehoeks");
+    c.backspace_romaji();
+    assert_eq!(c.preedit(), "ほげほげほえk");
+    c.backspace_romaji();
+    assert_eq!(c.preedit(), "ほげほげほえ");
+    assert_eq!(commit_of("hogehogehoe").1, "ほげほげほえ");
+}
+
+#[test]
+fn 変換できなかった子音を_backspace_のあとの打鍵が_かなにできる() {
+    for (keys, then, want) in [
+        ("hogehogehoeks", "a", "ほげほげほえか"),
+        ("hogehogehoeks", "ya", "ほげほげほえきゃ"),
+        ("anacondk", "aga", "あなこんだが"),
+        ("tokenizatx", "ion", "tokenization"),
+    ] {
+        let mut c = typed_known(keys);
+        press_backspace(&mut c);
+        type_with_hyphen(&mut c, then);
+        assert_eq!(observe(c).2, want, "{keys}<bs>{then}");
+    }
+}
+
+#[test]
+fn 変換できなかった子音を_backspace_で消した状態は_最後の打鍵を除いて打った状態と同じ() {
+    for keys in ["hogehogehoeks", "kyouhaiitenkidesuneks", "tokenizatx", "anacondk", "hogehogehoekst", "hogeks", "mergex", "kyouhaiitenkidesunek"] {
+        let mut c = typed_known(keys);
+        press_backspace(&mut c);
+        let fewer = &keys[..keys.len() - 1];
+        assert_eq!(observe(c), observe(typed_known(fewer)), "{keys}<bs> と {fewer}");
+    }
+}
+
+#[test]
+fn 知られた語の活用形と複合語は_かなが_4_単位続いても英字のまま確定する() {
+    for keys in ["maintainers", "datasource"] {
+        let c = typed_known(keys);
+        assert_eq!(c.phase(), Phase::Dangling, "{keys}");
+        let (shown, _, committed) = observe(c);
+        assert_eq!((shown.as_str(), committed.as_str()), (keys, keys), "{keys}");
+    }
+}
+
+#[test]
+fn 知られた語の活用形と複合語のあとに助詞が続けば_英語の頭に分ける() {
+    for (keys, want) in [
+        ("maintainersdesu", "maintainersです"),
+        ("repositoriesdesu", "repositoriesです"),
+        ("queriesga", "queriesが"),
+        ("generatingdesu", "generatingです"),
+        ("committedga", "committedが"),
+        ("readonlydesu", "readonlyです"),
+        ("sourcedwo", "sourcedを"),
+    ] {
+        assert_eq!(observe(typed_known(keys)).2, want, "{keys}");
+    }
+}
+
+#[test]
+fn 知られた語に未確定の子音が付いている間は英字のまま表示する() {
+    for keys in ["commandg", "parametern", "documentg", "sourcec", "maintainersg"] {
+        let c = typed_known(keys);
+        assert!(c.has_romaji(), "{keys}");
+        assert_eq!(c.phase(), Phase::Dangling, "{keys}");
+        assert_eq!(c.preedit(), keys, "{keys}");
+    }
+    assert_ne!(typed_known("commandgx").phase(), Phase::Dangling);
+}
+
+#[test]
+fn 知られた語に助詞が打ちかけの間も_打鍵のたびに英字のまま表示して_打ち終えたら分ける() {
+    // 打鍵ごとの下線の表示。語の直後から tail の途中まで英字のまま、tail が揃った打鍵で語 + かなになる。
+    for (word, tail, split) in [("command", "kara", "commandから"), ("append", "suru", "appendする"), ("opensearch", "wo", "opensearchを")] {
+        let keys = format!("{word}{tail}");
+        for len in word.len()..keys.len() {
+            let typed = &keys[..len];
+            assert_eq!(typed_known(typed).preedit(), typed, "{typed}");
+        }
+        assert_eq!(typed_known(&keys).preedit(), split, "{keys}");
+        assert_eq!(observe(typed_known(&keys)).2, split, "{keys}");
+    }
+    // 打ちかけで Enter を押したときも、表示のまま確定する。
+    for keys in ["commandka", "appendsu", "opensearchw"] {
+        let (shown, _, committed) = observe(typed_known(keys));
+        assert_eq!((shown.as_str(), committed.as_str()), (keys, keys), "{keys}");
+    }
+}
+
+#[test]
+fn 知られた語に見えない打鍵列の助詞らしい打ちかけは_日本語の打ち間違いのままかなで表示する() {
+    for (keys, shown) in [("hogehogehoekska", "ほげほげほえksか"), ("kyouhaiitenkidesunekskara", "きょうはいいてんきですねksから")] {
+        let c = typed_known(keys);
+        assert_ne!(c.phase(), Phase::Dangling, "{keys}");
+        assert_eq!(c.preedit(), shown, "{keys}");
+    }
+}
+
+#[test]
+fn 長音のあとも_かなの単位として数える() {
+    for (keys, want) in [
+        ("ra-mennwotabetaiks", "らーめんをたべたいks"),
+        ("sa-ba-gaotitaks", "さーばーがおちたks"),
+        ("de-tawohozonnsitaks", "でーたをほぞんしたks"),
+    ] {
+        let c = typed_known(keys);
+        assert_ne!(c.phase(), Phase::Dangling, "{keys}");
+        let (shown, _, committed) = observe(c);
+        assert_eq!((shown.as_str(), committed.as_str()), (want, want), "{keys}");
+    }
+}
+
+#[test]
+fn 英単語か英単語の途中の打鍵は_かなが_4_単位続いても英字のまま() {
+    let lexicon = FakeLexicon::default().with_english_word(|w| w == "appointment").with_english_prefix(|w| "appointment".starts_with(w));
+    let log = Log::default();
+    let mut c = Composer::new(MockEngine { log, table: Vec::new() }, lexicon);
+    for ch in "appointment".chars() {
+        c.type_romaji(&ch.to_string());
+    }
+    assert_eq!(c.phase(), Phase::Dangling);
+    assert_eq!(c.preedit(), "appointment");
+    // 語の途中で外れたら、かなに戻る。
+    let log = Log::default();
+    let lexicon = FakeLexicon::default().with_english_word(|w| w == "appointment").with_english_prefix(|w| "appointment".starts_with(w));
+    let mut c = Composer::new(MockEngine { log, table: Vec::new() }, lexicon);
+    for ch in "appointmx".chars() {
+        c.type_romaji(&ch.to_string());
+    }
+    assert_ne!(c.phase(), Phase::Dangling);
+    assert_eq!(c.preedit(), "あっぽいんtmx");
+}
+
 /// 英単語 issue / made を辞書の英単語とし、`headwords` を辞書の見出し、`prefers` を審判の答えにしたもの。
 fn word_composer(headwords: &[&str], prefers: bool) -> (Composer<MockEngine, FakeLexicon>, Log) {
     let log = Log::default();
@@ -3259,13 +3467,13 @@ fn 開発用語の一覧の語は3文字でも助詞の前で英語の頭にし_
     let lexicon = || FakeLexicon::default().with_dev_word(|w| matches!(w, "git" | "todo" | "token"));
     for (keys, shown) in [("gitwo", "gitを"), ("todoga", "todoが"), ("tokende", "tokenで"), ("tokennisuru", "tokenにする")] {
         let mut c = Composer::new(MockEngine { log: Log::default(), table: vec![] }, lexicon());
-        type_keys(&mut c, keys);
+        type_with_hyphen(&mut c, keys);
         assert_eq!(c.preedit(), shown, "{keys}");
         assert_eq!(c.commit_preview(), shown, "{keys}");
     }
     for (keys, shown) in [("todoke", "とどけ"), ("gitai", "ぎたい"), ("tokei", "とけい")] {
         let mut c = Composer::new(MockEngine { log: Log::default(), table: vec![] }, lexicon());
-        type_keys(&mut c, keys);
+        type_with_hyphen(&mut c, keys);
         assert_eq!(c.preedit(), shown, "{keys}");
     }
 }
